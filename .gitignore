@@ -1,0 +1,47 @@
+# --- 虚拟环境 ---
+venv/
+
+# --- Python 编译文件和缓存 ---
+**/__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+*.egg
+*.pyd
+
+# --- 数据集目录（大文件不跟踪）---
+input/
+
+# --- 输出目录（模型、日志、提交文件）---
+output/
+
+# --- IDE 配置文件 ---
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?  # Vim 临时文件
+
+# --- 本地日志和临时文件 ---
+*.log
+*.tmp
+*.bak
+
+# --- 本地环境配置 ---
+.env
+.local.env
+
+# --- 编译生成目录 ---
+build/
+dist/
+target/
+
+# --- 测试缓存 ---
+.pytest_cache/
+.mypy_cache/
+
+# --- 系统文件 ---
+.DS_Store  # Mac 系统文件
+Thumbs.db  # Windows 缩略图缓存

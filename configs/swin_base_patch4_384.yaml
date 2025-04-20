@@ -1,0 +1,23 @@
+# Swin‑B/384  覆盖文件
+model:
+  backbone: "swin_base_patch4_window12_384"   # timm 名称
+  pretrained: true                            # 用 ImageNet‑1k 权重即可
+  num_classes: 5
+
+train:
+  img_size: 384
+  epochs: 30
+
+  mixup_alpha: 0.0     # 关闭 Mixup
+  cutmix_alpha: 0.0    # 关闭 Cutmix
+  rand_aug_m: 9        # 降低 RandAug 强度
+  rand_aug_n: 2
+
+  # -------- batch / lr --------
+  batch_size: 16              # 最大 batch size 为 16
+  accum_steps: 4             # 等效全局 batch = 16
+  lr: 0.00002                 # 线性缩放后的学习率：1e-3 * 16 / 4096 = 0.0004
+  warmup_epochs: 5           # timm 调度器用
+  weight_decay: 0.0001         # 降低正则化
+  warmup_lr: 0.0000002      # 新增参数
+  min_lr: 0.000002          # 新增参数

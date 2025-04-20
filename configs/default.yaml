@@ -1,0 +1,35 @@
+# --- 数据集路径 ---
+data:
+  train_csv: "input/diabetic-retinopathy-resized/trainLabels.csv"
+  img_dir:   "input/diabetic-retinopathy-resized/resized_train_ben"
+  valid_ratio: 0.15
+  col_id:       "image"
+  col_label:    "level"
+  use_ben_offline: true
+  ben_sigma: 10.0
+
+# ---训练 ---
+train:
+  compile: false           # <— 新增：是否 torch.compile
+  compile_mode: "default" # default / reduce-overhead / max-autotune
+  tf32: true              # 是否允许 TensorFloat‑32
+
+  epochs: 25
+  batch_size: 64
+  prefetch_factor: 8
+  num_workers: 16
+  seed: 77
+  rand_aug_gpu: true
+
+  optimizer: "AdamW"
+  weight_decay: 0.05
+  label_smoothing: 0.1
+
+  scheduler: "cosine"
+  mixup_alpha: 0.4
+  cutmix_alpha: 1.0
+  ema_decay: 0.9999
+
+output:
+  dir: "output"
+  save_top_k: 3
