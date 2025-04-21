@@ -1,39 +1,59 @@
-# --- 数据集路径 ---
+# ───────────────────────────── Data Configuration ─────────────────────────────
 data:
-  train_csv: "input/diabetic-retinopathy-resized/trainLabels.csv"
-  img_dir:   "input/diabetic-retinopathy-resized/resized_train_ben"
-  valid_ratio: 0.15
-  col_id:       "image"
-  col_label:    "level"
-  use_ben_offline: true
-  ben_sigma: 10.0
+  train_csv: "input/diabetic-retinopathy-resized/trainLabels.csv"  # Path to CSV file mapping image IDs to labels
+  img_dir:   "input/diabetic-retinopathy-resized/resized_train_ben"  # Directory containing preprocessed training images
+  valid_ratio: 0.15                                               # Fraction of training data to hold out for validation
+  col_id:       "image"                                           # Name of the column in train_csv that contains the image identifier
+  col_label:    "level"                                           # Name of the column in train_csv that contains the target label
+  use_ben_offline: true                                           # Flag indicating whether the training set has already been preprocessed offline with BEN
+  ben_sigma: 10.0                                                 # Sigma parameter for BEN preprocessing (controls smoothing)
 
-# ---训练 ---
+# ───────────────────────────── Model Configuration ─────────────────────────────
+model:
+  backbone: "swin_base_patch4_window12_384"   # Name of the pretrained backbone model in timm (Swin Transformer)
+  pretrained: true                            # Whether to load ImageNet‑1k pretrained weights
+  num_classes: 5                              # Number of output classes (diabetic retinopathy severity levels)
+
+# ───────────────────────────── Training Parameters ─────────────────────────────
 train:
-  compile: false           # <— 新增：是否 torch.compile
-  compile_mode: "default" # default / reduce-overhead / max-autotune
-  tf32: true              # 是否允许 TensorFloat‑32
+  compile: false                              # If true, compile the model with torch.compile (PyTorch 2.0+)
+  compile_mode: "default"                     # Mode to pass into torch.compile if enabled
+  tf32: true                                  # Enable TF32 tensor cores on Ampere+ GPUs for speed
 
-  epochs: 25
-  batch_size: 64
-  prefetch_factor: 8
-  num_workers: 16
-  seed: 77
-  rand_aug_gpu: true
+  img_size: 384                               # Input image resolution (height and width)
+  epochs: 30                                  # Total number of training epochs
 
-  optimizer: "AdamW"
-  weight_decay: 0.05
-  label_smoothing: 0.1
+  batch_size: 16                              # Number of samples per batch
+  accum_steps: 1                              # Gradient accumulation steps (to simulate larger batch sizes)
+  prefetch_factor: 8                          # Prefetch buffer size for data loading
+  num_workers: 16                             # Number of worker processes for data loading
+  seed: 77                                    # Random seed for reproducibility
 
-  scheduler: "cosine"
-  mixup_alpha: 0.4
-  cutmix_alpha: 1.0
-  ema_decay: 0.9999
-  focal_gamma: 0
+  rand_aug_gpu: true                          # Apply RandAugment on the GPU for faster augmentation
+  rand_aug_n: 2                               # Number of augmentation operations per image sample
+  rand_aug_m: 5                               # Magnitude for RandAugment operations
 
-  use_oversampling: false   # 是否启用过采样（WeightedRandomSampler）
-  use_class_weight: false   # 是否在损失函数中使用类别权重
+  optimizer: "AdamW"                          # Optimizer type (Adam with decoupled weight decay)
+  lr: 0.00008                                 # Initial (maximum) learning rate
+  warmup_lr: 0.000001                         # Starting learning rate for warmup phase
+  min_lr: 0.00001                             # Minimum learning rate at end of schedule
+  weight_decay: 0.00001                       # Weight decay (L2 regularization) coefficient
+  warmup_epochs: 5                            # Number of epochs for learning rate warmup
 
+  label_smoothing: 0.1                        # Amount of label smoothing to apply to targets
+
+  scheduler: "cosine"                         # Learning rate scheduler type (cosine annealing)
+
+  mixup_alpha: 0.2                            # Alpha parameter for Mixup data augmentation
+  cutmix_alpha: 0.0                           # Alpha parameter for CutMix (0 to disable)
+  ema_decay: 0.9999                           # Exponential moving average decay for model weights
+  focal_gamma: 1.5                            # Gamma parameter for focal loss (if used)
+
+  use_oversampling: true                      # Enable oversampling of minority classes to balance dataset
+  use_class_weight: false                     # Enable weighting the loss by class frequencies
+
+# ───────────────────────────── Output Configuration ─────────────────────────────
 output:
-  dir: "output"
-  save_top_k: 3
+  dir: "output"                               # Directory to save checkpoints, logs, and metrics
+  save_interval: 5                            # Save a checkpoint every N epochs
+  save_top_k: 3                               # Keep only the top K best-performing checkpoints (by validation metric)

@@ -67,16 +67,22 @@ def main():
     8. Build model, optimizer, scheduler, and EMA
     9. Training loop
     10. Scheduler step and validation
-    11. Save best checkpoint
+    11. Save best model for each interval
+    12. Save overall best checkpoint
     """
     # ──────────────── 1. Set random seed and enable backend optimizations ────────────────
     seed_everything(cfg.train.seed)
     enable_backend_opt(cfg)
 
-    # ──────────────── 2. Create output directory ────────────────
+    # ──────────────── 2. Prepare output directory and initialize interval parameters ────────────────
     os.makedirs(cfg.output.dir, exist_ok=True)
     ckpt_dir = os.path.join(cfg.output.dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
+    # Number of epochs between saving the best interval checkpoint
+    save_interval = cfg.output.get("save_interval", 1)
+    # Track best F1 and state for the current interval
+    interval_best_f1 = 0.0
+    interval_best_state = None
 
     # ──────────────── 3. Read and split the dataset ────────────────
     df = pd.read_csv(cfg.data.train_csv)
@@ -165,6 +171,8 @@ def main():
     )
 
     best_val_f1 = 0.0
+    # List to keep saved interval checkpoint filenames
+    interval_files = []
 
     # ──────────────── 9. Training Loop ────────────────
     for epoch in range(1, cfg.train.epochs + 1):
@@ -259,7 +267,28 @@ def main():
             f = val_metrics['f1'][i].item()
             print(f"    Class {i:>2} — Prec: {p:.4f}, Rec: {r:.4f}, F1: {f:.4f}")
 
-        # ──────────────── 11. Save best-performing checkpoint (by macro F1 score) ────────────────
+        # ──────────────── 11. Interval-based checkpoint saving ────────────────
+        # Update interval best if current F1 exceeds previous best in this interval
+        if val_macro_f1 > interval_best_f1:
+            interval_best_f1 = val_macro_f1
+            interval_best_state = (ema.module if ema else model).state_dict()
+
+        # At the end of each interval or the final epoch, save the best interval model
+        if epoch % save_interval == 0 or epoch == cfg.train.epochs:
+            if interval_best_state is not None:
+                interval_idx = (epoch - 1) // save_interval + 1
+                interval_fname = f"interval_{interval_idx}_best_{interval_best_f1:.4f}.pt"
+                torch.save(interval_best_state, os.path.join(ckpt_dir, interval_fname))
+                interval_files.append(interval_fname)
+                # Remove older interval checkpoints beyond save_top_k
+                while len(interval_files) > cfg.output.save_top_k:
+                    old_file = interval_files.pop(0)
+                    os.remove(os.path.join(ckpt_dir, old_file))
+            # Reset interval tracking for the next period
+            interval_best_f1 = 0.0
+            interval_best_state = None
+
+        # ──────────────── 12. Save best-performing checkpoint (by macro F1 score) ────────────────
         if val_macro_f1 > best_val_f1:
             best_val_f1 = val_macro_f1
             fname = f"best_{best_val_f1:.4f}.pt"
