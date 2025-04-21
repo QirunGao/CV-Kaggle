@@ -22,7 +22,7 @@ __all__ = [
 
 def seed_everything(seed: int = 42):
     """
-    固定所有随机种子，确保实验可复现。
+    Fix all random seeds to ensure reproducibility.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -34,10 +34,10 @@ def seed_everything(seed: int = 42):
 
 def enable_backend_opt(cfg):
     """
-    根据配置启用后端性能优化：
+    Enable backend performance optimizations based on configuration:
       - cudnn.benchmark
-      - TF32 运算精度
-      - float32 矩阵乘法高精度模式
+      - TF32 math precision
+      - High-precision mode for float32 matrix multiplications
     """
     torch.backends.cudnn.benchmark = True
     if cfg.train.tf32:
@@ -48,14 +48,14 @@ def enable_backend_opt(cfg):
 
 def split_dataframe(df, valid_ratio: float = 0.15, seed: int = 42):
     """
-    打乱并拆分 DataFrame 为训练集和验证集。
+    Shuffle and split a DataFrame into training and validation sets.
 
-    参数:
-      df:          原始 DataFrame
-      valid_ratio: 验证集占比
-      seed:        随机种子
+    Args:
+      df:          The original DataFrame.
+      valid_ratio: Proportion of samples to use for validation.
+      seed:        Random seed for shuffling.
 
-    返回:
+    Returns:
       train_df, val_df
     """
     df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
@@ -65,7 +65,7 @@ def split_dataframe(df, valid_ratio: float = 0.15, seed: int = 42):
 
 class AverageMeter:
     """
-    计算并跟踪累积的平均值。
+    Computes and stores the running average of values.
     """
 
     def __init__(self):
@@ -74,28 +74,28 @@ class AverageMeter:
         self.reset()
 
     def reset(self):
-        """重置计数和累加和。"""
+        """Reset sum and count."""
         self.sum = 0.0
         self.count = 0
 
     def update(self, value: float, n: int = 1):
         """
-        累加新值。
+        Add a new value.
 
-        参数:
-          value: 新增的标量或批次平均值
-          n:     样本数量
+        Args:
+          value: The new scalar or batch average to add.
+          n:     Number of samples that this value represents.
         """
         self.sum += value * n
         self.count += n
 
     @property
     def avg(self) -> float:
-        """返回当前的平均值。"""
+        """Return the current average."""
         return self.sum / max(self.count, 1)
 
 
-# ───────────── Optimizer 与 Scheduler 配置映射 ─────────────
+# ───────────── Optimizer and Scheduler Mappings ─────────────
 _OPTIMIZER_MAP = {
     "AdamW": optim.AdamW,
     "Adam": optim.Adam,
@@ -113,14 +113,14 @@ _SCHEDULER_MAP = {
 
 def build_optimizer(model: nn.Module, cfg_train) -> optim.Optimizer:
     """
-    根据训练配置创建优化器。
+    Create an optimizer based on training configuration.
 
-    参数:
-      model:      需优化参数的模型
-      cfg_train:  包含 lr、weight_decay、optimizer 名称等
+    Args:
+      model:      The model whose parameters will be optimized.
+      cfg_train:  Configuration containing lr, weight_decay, optimizer name, etc.
 
-    返回:
-      初始化好的 Optimizer 实例
+    Returns:
+      An initialized Optimizer instance.
     """
     name = cfg_train.optimizer
     if name not in _OPTIMIZER_MAP:
@@ -133,14 +133,14 @@ def build_optimizer(model: nn.Module, cfg_train) -> optim.Optimizer:
 
 def build_scheduler(optimizer: optim.Optimizer, cfg_train):
     """
-    根据训练配置创建学习率调度器，支持可选 warmup。
+    Create a learning rate scheduler based on training configuration, with optional warmup.
 
-    参数:
-      optimizer:  已创建的优化器
-      cfg_train:  包含 scheduler 类型、epochs、warmup_epochs 等
+    Args:
+      optimizer:  The optimizer to be scheduled.
+      cfg_train:  Configuration containing scheduler type, epochs, warmup_epochs, etc.
 
-    返回:
-      调度器实例（或 SequentialLR）
+    Returns:
+      A scheduler instance (or a SequentialLR for warmup + main scheduler).
     """
     name = cfg_train.scheduler
     if name not in _SCHEDULER_MAP:
@@ -150,11 +150,11 @@ def build_scheduler(optimizer: optim.Optimizer, cfg_train):
     warmup_epochs = getattr(cfg_train, "warmup_epochs", 0)
     warmup_lr = getattr(cfg_train, "warmup_lr", None)
 
-    # Warmup 阶段
+    # Warmup phase
     if warmup_epochs > 0:
         if name == "plateau":
             raise ValueError(
-                "Warmup 不适用于 ReduceLROnPlateau 调度器，请将 warmup_epochs 设为 0。"
+                "Warmup is not supported for ReduceLROnPlateau; set warmup_epochs to 0."
             )
         from torch.optim.lr_scheduler import SequentialLR, LinearLR
 
@@ -166,7 +166,7 @@ def build_scheduler(optimizer: optim.Optimizer, cfg_train):
             total_iters=warmup_epochs,
         )
 
-        # 主调度器
+        # Main scheduler after warmup
         if name == "cosine":
             main = CosineAnnealingLR(
                 optimizer,
@@ -199,7 +199,7 @@ def build_scheduler(optimizer: optim.Optimizer, cfg_train):
             milestones=[warmup_epochs],
         )
 
-    # 无 Warmup
+    # No warmup phase
     if name == "cosine":
         return CosineAnnealingLR(
             optimizer,
@@ -235,11 +235,11 @@ def build_scheduler(optimizer: optim.Optimizer, cfg_train):
 
 class FocalLoss(nn.Module):
     """
-    Focal Loss 多分类实现。
+    Focal Loss implementation for multiclass classification.
 
-    参数:
-      gamma:  聚焦系数
-      weight: 类别权重张量（可选）
+    Args:
+      gamma:  Focusing parameter.
+      weight: Class weight tensor (optional).
     """
 
     def __init__(self, gamma: float = 2.0, weight: torch.Tensor | None = None):
@@ -249,7 +249,7 @@ class FocalLoss(nn.Module):
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
-        计算 Focal Loss：
+        Compute the Focal Loss:
           FL = (1 - p_t)^γ * CE(logits, targets)
         """
         ce_loss = f.cross_entropy(logits, targets, weight=self.weight, reduction="none")

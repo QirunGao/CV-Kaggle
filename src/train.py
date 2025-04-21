@@ -31,16 +31,14 @@ from src.utils import (
 
 def rand_bbox(size, lam):
     """
-    ─────────────────────────────────────────────────────────────────
-    生成 CutMix 的随机裁剪框。
+    Generate a random bounding box for CutMix.
 
-    参数:
-      size: 输入张量尺寸 (B, C, H, W)
-      lam: 混合比例 λ
+    Args:
+      size: input tensor dimensions (B, C, H, W)
+      lam: mix ratio λ
 
-    返回:
-      bbx1, bby1, bbx2, bby2: 裁剪框左上和右下坐标
-    ─────────────────────────────────────────────────────────────────
+    Returns:
+      bbx1, bby1, bbx2, bby2: top-left and bottom-right coordinates of the crop box
     """
     w, h = size[3], size[2]
     cut_rat = np.sqrt(1.0 - lam)
@@ -58,29 +56,29 @@ def rand_bbox(size, lam):
 # ────────────────────────────────────── main ──────────────────────────────────────
 def main():
     """
-    训练脚本主流程：
-    1. 随机种子与后端优化
-    2. 创建输出目录
-    3. 读取并划分数据集
-    4. 设备选择
-    5. GPU 端 RandAugment 与 Normalize
-    6. 梯度累积设置
-    7. 构建 DataLoader
-    8. 构建模型、优化器、调度器、EMA
-    9. 训练循环
-    10. 调度器更新与验证
-    11. 保存最佳 checkpoint
+    Main training loop:
+    1. Set random seed and enable backend optimizations
+    2. Create output directories
+    3. Read and split the dataset
+    4. Select device
+    5. Setup GPU-based RandAugment and Normalize
+    6. Set up gradient accumulation
+    7. Build DataLoaders
+    8. Build model, optimizer, scheduler, and EMA
+    9. Training loop
+    10. Scheduler step and validation
+    11. Save best checkpoint
     """
-    # ──────────────── 1. 随机种子与后端优化 ────────────────
+    # ──────────────── 1. Set random seed and enable backend optimizations ────────────────
     seed_everything(cfg.train.seed)
     enable_backend_opt(cfg)
 
-    # ──────────────── 2. 创建输出目录 ────────────────
+    # ──────────────── 2. Create output directory ────────────────
     os.makedirs(cfg.output.dir, exist_ok=True)
     ckpt_dir = os.path.join(cfg.output.dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    # ──────────────── 3. 读取并划分数据集 ────────────────
+    # ──────────────── 3. Read and split the dataset ────────────────
     df = pd.read_csv(cfg.data.train_csv)
     train_df, val_df = split_dataframe(df, cfg.data.valid_ratio, cfg.train.seed)
 
@@ -89,10 +87,10 @@ def main():
     print(f"Train class distribution:\n", train_df[cfg.data.col_label].value_counts())
     print(f"Validation class distribution:\n", val_df[cfg.data.col_label].value_counts())
 
-    # ──────────────── 4. 设备选择 ────────────────
+    # ──────────────── 4. Device selection ────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # ──────────────── 5. GPU RandAugment 与 Normalize ────────────────
+    # ──────────────── 5. GPU-side RandAugment and Normalize ────────────────
     rand_aug_gpu = None
     gpu_normalize = None
     if getattr(cfg.train, "rand_aug_gpu", False):
@@ -102,10 +100,10 @@ def main():
             std=torch.tensor((0.229, 0.224, 0.225), device=device),
         )
 
-    # ──────────────── 6. 梯度累积设置 ────────────────
+    # ──────────────── 6. Gradient accumulation setup ────────────────
     accum_steps = getattr(cfg.train, "accum_steps", 1)
 
-    # ──────────────── 7. 构建 DataLoader ────────────────
+    # ──────────────── 7. Build DataLoaders ────────────────
     if cfg.train.use_oversampling:
         counts = train_df[cfg.data.col_label].value_counts().to_dict()
         sample_weights = train_df[cfg.data.col_label].map(
@@ -141,7 +139,7 @@ def main():
         persistent_workers=True,
     )
 
-    # ──────────────── 8. 构建模型、优化器、调度器、EMA ────────────────
+    # ──────────────── 8. Build model, optimizer, scheduler, EMA ────────────────
     model = build_model().to(device, memory_format=torch.channels_last)
     if cfg.train.compile:
         model = torch.compile(model, mode=cfg.train.compile_mode)
@@ -168,7 +166,7 @@ def main():
 
     best_val_f1 = 0.0
 
-    # ──────────────── 9. 训练循环 ────────────────
+    # ──────────────── 9. Training Loop ────────────────
     for epoch in range(1, cfg.train.epochs + 1):
         model.train()
         loss_meter = AverageMeter()
@@ -184,12 +182,12 @@ def main():
             imgs = imgs.to(device, non_blocking=True)  # type: ignore
             labels = labels.to(device, non_blocking=True)
 
-            # GPU 端增强
+            # Apply GPU-side augmentation if enabled
             if rand_aug_gpu:
                 imgs = rand_aug_gpu(imgs)
                 imgs = gpu_normalize(imgs)
 
-            # CutMix / MixUp 逻辑
+            # Handle CutMix / MixUp logic
             if cfg.train.cutmix_alpha > 0 and cfg.train.mixup_alpha > 0:
                 if np.random.rand() < 0.5:
                     # CutMix
@@ -206,7 +204,7 @@ def main():
                     imgs = lam * imgs + (1 - lam) * imgs[perm]
                     labels_a, labels_b = labels, labels[perm]
             elif cfg.train.cutmix_alpha > 0:
-                # CutMix 仅模式
+                # CutMix only
                 lam = np.random.beta(cfg.train.cutmix_alpha, cfg.train.cutmix_alpha)
                 perm = torch.randperm(imgs.size(0), device=device)
                 bbx1, bby1, bbx2, bby2 = rand_bbox(imgs.size(), lam)
@@ -214,25 +212,25 @@ def main():
                 lam = 1 - (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size(-1) * imgs.size(-2))
                 labels_a, labels_b = labels, labels[perm]
             elif cfg.train.mixup_alpha > 0:
-                # MixUp 仅模式
+                # MixUp only
                 lam = np.random.beta(cfg.train.mixup_alpha, cfg.train.mixup_alpha)
                 perm = torch.randperm(imgs.size(0), device=device)
                 imgs = lam * imgs + (1 - lam) * imgs[perm]
                 labels_a, labels_b = labels, labels[perm]
             else:
-                # 无混合
+                # No mixing
                 labels_a = labels
                 labels_b = labels
                 lam = 1.0
 
-            # 损失与反向传播
+            # Compute loss and backpropagation
             with autocast(device_type='cuda'):
                 logits = model(imgs)
                 loss = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
 
             scaler.scale(loss).backward()
 
-            # 梯度累积与 EMA 更新
+            # Optimizer step and EMA update with gradient accumulation
             if step % accum_steps == 0 or step == len(train_loader):
                 scaler.step(optimizer)
                 scaler.update()
@@ -243,7 +241,7 @@ def main():
             loss_meter.update(loss.item() * accum_steps, n=imgs.shape[0])
             pbar.set_postfix(loss=loss_meter.avg)
 
-        # ──────────────── 10. 调度器更新与验证 ────────────────
+        # ──────────────── 10. Scheduler step & validation metrics ────────────────
         if cfg.train.scheduler == "plateau":
             eval_model = ema.module if ema else model
             val_metrics = _validate(eval_model, val_loader, device)
@@ -261,7 +259,7 @@ def main():
             f = val_metrics['f1'][i].item()
             print(f"    Class {i:>2} — Prec: {p:.4f}, Rec: {r:.4f}, F1: {f:.4f}")
 
-        # ──────────────── 11. 保存最佳 checkpoint ────────────────
+        # ──────────────── 11. Save best-performing checkpoint (by macro F1 score) ────────────────
         if val_macro_f1 > best_val_f1:
             best_val_f1 = val_macro_f1
             fname = f"best_{best_val_f1:.4f}.pt"
@@ -276,10 +274,18 @@ def main():
     print("Training completed.")
 
 
-# ─────────────────────────────── 验证函数 _validate ───────────────────────────────
+# ─────────────────────────────── Validation Function ───────────────────────────────
 def _validate(model, loader, device):
     """
-    执行模型在验证集上的评估，返回各类别 Precision、Recall、F1 及宏平均 F1。
+    Evaluate the model on the validation set and compute the following metrics:
+      - Per-class precision
+      - Per-class recall
+      - Per-class F1 score
+      - Macro-averaged F1 score
+
+    Returns
+    -------
+    A dictionary containing metric tensors.
     """
     metrics = MetricCollection({
         'precision': MulticlassPrecision(num_classes=cfg.model.num_classes, average=None),

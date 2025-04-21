@@ -14,14 +14,14 @@ from src.data.retino_dataset import ben_preprocess
 
 def _worker(out_dir: str, sigma_x: float, path: str) -> None:
     fn = os.path.basename(path)
-    # 读取并转换为 RGB
+    # Read and convert to RGB
     img_bgr = cv2.imread(path)
     img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    # 调用预处理函数
+    # Apply preprocessing
     img = ben_preprocess(img, sigma_x)
-    # 参数 params 作为 Sequence[int] 使用 tuple，避免类型检查误报
+    # Use tuple as Sequence[int] for `params` to avoid type-checking warnings
     params: Sequence[int] = (cv2.IMWRITE_JPEG_QUALITY, 95)
-    # 写出图像（回转为 BGR）
+    # Write the image (converted back to BGR)
     success = cv2.imwrite(
         os.path.join(out_dir, fn),
         cv2.cvtColor(img, cv2.COLOR_RGB2BGR),

@@ -1,22 +1,21 @@
 ﻿@echo off
-chcp 65001 >nul
 
-REM 切换到脚本所在目录
+REM Switch to the directory where the script is located
 cd /d "%~dp0"
 
-REM 检查 venv 是否存在
+REM Check if venv exists
 IF NOT EXIST "venv\Scripts\activate.bat" (
     echo.
-    echo venv 不存在，正在创建...
+    echo venv not found, creating...
     python -m venv venv
-    echo venv 创建完成
+    echo venv created successfully
 )
 
-REM 弹出新窗口并激活虚拟环境
-echo 正在启动新的虚拟环境终端窗口...
-start "" cmd /k "cd /d \"%~dp0\" & call venv\Scripts\activate.bat & echo 已激活 venv"
+REM Open a new window and activate the virtual environment
+echo Launching a new terminal window with the virtual environment...
+start "" cmd /k "cd /d \"%~dp0\" & call venv\Scripts\activate.bat & echo venv activated"
 
 echo.
-echo 已启动新窗口，%~n0 将在 5 秒后自动退出...
+echo New window launched. %~n0 will exit automatically in 5 seconds...
 timeout /t 5 >nul
 exit /b

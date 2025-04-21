@@ -15,12 +15,12 @@ from src.utils import enable_backend_opt
 
 def main():
     # ─────────────────────────────
-    # 1. 启用后端优化（如 cudnn benchmark 等）
+    # 1. Enable backend optimizations (e.g., cudnn benchmark)
     # ─────────────────────────────
     enable_backend_opt(cfg)
 
     # ─────────────────────────────
-    # 2. 自动加载最新 checkpoint
+    # 2. Automatically load the latest checkpoint
     # ─────────────────────────────
     ckpt_dir = os.path.join(cfg.output.dir, "checkpoints")
     ckpts = sorted(os.listdir(ckpt_dir))
@@ -29,7 +29,7 @@ def main():
     ckpt_path = os.path.join(ckpt_dir, ckpts[-1])
 
     # ─────────────────────────────
-    # 3. 加载测试数据（默认取前 100 条作为示例）
+    # 3. Load test data (by default, use the first 100 samples as a demo)
     # ─────────────────────────────
     df = pd.read_csv(cfg.data.train_csv).iloc[:100].copy()
     dl_kwargs = dict(
@@ -46,7 +46,7 @@ def main():
     )
 
     # ─────────────────────────────
-    # 4. 构建模型 & 加载权重
+    # 4. Build the model & load weights
     # ─────────────────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = build_model().to(device, memory_format=torch.channels_last)
@@ -58,7 +58,7 @@ def main():
     model.eval()
 
     # ─────────────────────────────
-    # 5. 执行推理
+    # 5. Run inference
     # ─────────────────────────────
     all_preds = []
     with torch.no_grad(), torch.cuda.amp.autocast():
@@ -69,7 +69,7 @@ def main():
             all_preds.extend(preds.cpu().tolist())
 
     # ─────────────────────────────
-    # 6. 保存推理结果为 CSV
+    # 6. Save inference results to CSV
     # ─────────────────────────────
     out_df = pd.DataFrame({
         cfg.data.col_id: df[cfg.data.col_id],

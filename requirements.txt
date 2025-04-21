@@ -1,12 +1,12 @@
 --index-url https://download.pytorch.org/whl/cu124
 --extra-index-url https://pypi.org/simple
 
-# CUDA 12.1 官方 wheels
-torch==2.6.0+cu124          # ➜ 对应 torchvision 0.18 / torchaudio 2.3
+# CUDA 12.1 official wheels
+torch==2.6.0+cu124          # ➜ Corresponds to torchvision 0.18 / torchaudio 2.3
 torchvision==0.21.0+cu124
 torchaudio==2.6.0+cu124
 
-# 其余依赖
+# Other dependencies
 timm>=0.9.14
 albumentations>=1.4.0
 opencv-python-headless>=4.10

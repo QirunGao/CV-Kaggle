@@ -1,7 +1,7 @@
-# --- 虚拟环境 ---
+# --- Virtual Environment ---
 venv/
 
-# --- Python 编译文件和缓存 ---
+# --- Python Compiled Files & Caches ---
 **/__pycache__/
 *.py[cod]
 *.so
@@ -9,28 +9,33 @@ venv/
 *.egg
 *.pyd
 
-# --- IDE 配置文件 ---
+# --- IDE Configuration Files ---
 .vscode/
 .idea/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
-*.sw?  # Vim 临时文件
+*.sw?  # Vim temporary files
 
-# --- 本地日志和临时文件 ---
+# --- Local Logs & Temporary Files ---
 *.log
 *.tmp
 *.bak
 
-# --- 本地环境配置 ---
+# --- Local Environment Configs ---
 .env
 .local.env
 
-# --- 测试缓存 ---
+# --- Build Artifacts ---
+build/
+dist/
+target/
+
+# --- Test Caches ---
 .pytest_cache/
 .mypy_cache/
 
-# --- 系统文件 ---
-.DS_Store  # Mac 系统文件
-Thumbs.db  # Windows 缩略图缓存
+# --- System Files ---
+.DS_Store  # macOS system file
+Thumbs.db  # Windows thumbnail cache

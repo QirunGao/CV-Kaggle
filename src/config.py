@@ -1,19 +1,19 @@
 import os
 import yaml
 
-# 默认配置文件路径：指向 configs/default.yaml
+# Path to the default configuration file: points to configs/default.yaml
 BASE_CFG = os.path.join(os.path.dirname(__file__), "../configs/default.yaml")
 
-# 覆盖配置文件路径：通过环境变量 CFG_FILE 指定（可选）
+# Path to the override configuration file: optionally specified via environment variable CFG_FILE
 OVR_CFG = os.getenv("CFG_FILE", "")
 
 
 def _deep_merge(a: dict, b: dict) -> dict:
     """
-    深度合并字典 b 到字典 a 中（原地操作），返回合并后的结果。
+    Recursively merge dictionary b into dictionary a (in-place), and return the result.
 
-    - 若对应键的值均为字典，则递归合并；
-    - 否则以 b 中的值覆盖 a。
+    - If values corresponding to a key are both dictionaries, merge them recursively;
+    - Otherwise, overwrite a's value with b's.
     """
     for k, v in b.items():
         if k in a and isinstance(a[k], dict) and isinstance(v, dict):
@@ -23,11 +23,11 @@ def _deep_merge(a: dict, b: dict) -> dict:
     return a
 
 
-# 加载默认配置
+# Load the default configuration
 with open(BASE_CFG, "r", encoding="utf-8") as f:
     _raw_cfg = yaml.safe_load(f)
 
-# 若指定了覆盖配置文件，则读取后合并到默认配置
+# If an override config file is specified, load and merge it into the default config
 if OVR_CFG:
     with open(OVR_CFG, "r", encoding="utf-8") as f:
         _ovr_cfg = yaml.safe_load(f)
@@ -36,8 +36,8 @@ if OVR_CFG:
 
 class _CfgDict(dict):
     """
-    可使用属性方式访问的配置字典类。
-    支持递归转换内部嵌套字典为 _CfgDict 实例。
+    A configuration dictionary class that allows attribute-style access.
+    Recursively converts nested dictionaries to _CfgDict instances.
     """
 
     def __getattr__(self, name):
@@ -47,5 +47,5 @@ class _CfgDict(dict):
         return val
 
 
-# 构造最终配置对象，可通过 cfg.xxx.yyy 访问嵌套字段
+# Create the final config object; nested fields can be accessed via cfg.xxx.yyy
 cfg = _CfgDict(_raw_cfg)
