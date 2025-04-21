@@ -9,12 +9,6 @@ venv/
 *.egg
 *.pyd
 
-# --- 数据集目录（大文件不跟踪）---
-input/
-
-# --- 输出目录（模型、日志、提交文件）---
-output/
-
 # --- IDE 配置文件 ---
 .vscode/
 .idea/
@@ -32,11 +26,6 @@ output/
 # --- 本地环境配置 ---
 .env
 .local.env
-
-# --- 编译生成目录 ---
-build/
-dist/
-target/
 
 # --- 测试缓存 ---
 .pytest_cache/
