@@ -1,22 +1,8 @@
-"""
-RetinoDataset  ──────────────────────────────────────────────────────────────
-• 极速 libjpeg‑turbo 解码：torchvision.io.decode_jpeg
-• Ben‑Graham 预处理可选（离线做完就跳过）
-• 训练阶段若 cfg.train.rand_aug_gpu=True，不在 Dataset 内做 RandAug
-  —— 改由 train.py 在 GPU 完成
-
-2025‑04‑19 更新
-──────────────────────────────────────────────────────────────────────────────
-* 去掉 `ToTensorV2(dtype=...)`，提高对旧版 Albumentations 的兼容性；
-* 统一在 Dataset 中将图像转换为 `float32` 并缩放到 [0,1]；
-  若 `ToTensorV2` 已经输出 float 型且范围在 [0,1]，则不会再次除以 255。
-"""
 from __future__ import annotations
 
 import numpy as np
 import torch
 import torchvision
-
 import cv2
 from albumentations import Compose, Resize, Normalize
 from albumentations.pytorch import ToTensorV2
@@ -26,7 +12,10 @@ from src.config import cfg
 
 
 def crop_image_from_gray(img: np.ndarray, tol: int = 7) -> np.ndarray:
-    """去除四周灰度低于 tol 的黑边。支持单通道/三通道。"""
+    """
+    从图像中裁剪掉灰度值低于 tol 的边缘区域。
+    适用于单通道（灰度）或三通道（RGB）图像。
+    """
     if img.ndim == 2:
         mask = img > tol
         return img[np.ix_(mask.any(1), mask.any(0))]
@@ -42,25 +31,25 @@ def crop_image_from_gray(img: np.ndarray, tol: int = 7) -> np.ndarray:
 
 
 def ben_preprocess(img: np.ndarray, sigma_x: float = 10.0) -> np.ndarray:
-    """Ben Graham 对比度增强：4*img – 4*GaussianBlur(img) + 128"""
+    """
+    应用 Ben Graham 风格的图像预处理，用于增强视网膜图像的对比度。
+    操作：增强图像细节，执行：4*原图 - 4*模糊图 + 128
+    """
     img_cropped = crop_image_from_gray(img)
     blurred = cv2.GaussianBlur(img_cropped, (0, 0), sigma_x)
     return cv2.addWeighted(img_cropped, 4, blurred, -4, 128)
 
 
 def _get_tfms(is_train: bool) -> Compose:
-    """返回 Albumentations 变换管线。
+    """
+    构造 Albumentations 图像增强管线（变换组合器）。
 
-    • 始终输出 `torch.Tensor`，首要步骤：Resize → ToTensorV2。
-    • 若训练阶段启用了 GPU RandAugment，则 **不在这里** 做 Normalize，
-      由 `train.py` 在 GPU 侧完成；
-      否则直接插入 Normalize(mean=0.5, std=0.5)。
+    - Resize 是所有阶段的统一步骤；
+    - 若使用 GPU 端 RandAugment，则仅缩放图像至 [0,1]，不做标准化；
+    - 否则执行完整 Normalize(mean/std) 和 ToTensorV2 转换。
     """
     sz = cfg.train.img_size
     if is_train and cfg.train.rand_aug_gpu:
-        # 1) 先 Resize
-        # 2) Normalize(mean=0,std=1,max_pixel_value=255) 只做 /255 → [0,1]
-        # 3) ToTensorV2() → torch.float32
         return Compose([
             Resize(sz, sz),
             Normalize(mean=(0.0, 0.0, 0.0),
@@ -69,7 +58,6 @@ def _get_tfms(is_train: bool) -> Compose:
             ToTensorV2(),
         ])
     else:
-        # 验证/CPU 增强时：直接做完整的 Normalize + ToTensor
         return Compose([
             Resize(sz, sz),
             Normalize(mean=(0.485, 0.456, 0.406),
@@ -81,12 +69,12 @@ def _get_tfms(is_train: bool) -> Compose:
 
 class RetinoDataset(Dataset):
     """
-    视网膜 DR 数据集封装。
+    视网膜图像数据集封装类，用于 DR（糖尿病视网膜病变）分类任务。
 
-    Args
+    参数
     ----
-    df    : DataFrame，含 [cfg.data.col_id, cfg.data.col_label]
-    train : 是否训练模式
+    df    : 包含图像 ID 和标签的 Pandas DataFrame；
+    train : 指示是否为训练模式（控制数据增强策略）。
     """
 
     def __init__(self, df, train: bool = True):
@@ -102,20 +90,20 @@ class RetinoDataset(Dataset):
         img_name = row[cfg.data.col_id]
         img_path = f"{cfg.data.img_dir}/{img_name}.jpeg"
 
-        # 1. 极速 JPEG 解码 → HWC, uint8
+        # 1. 使用 libjpeg-turbo 快速读取 JPEG 图像，格式为 [H, W, C], uint8
         img_rgb = torchvision.io.decode_jpeg(
             torchvision.io.read_file(img_path),
             mode=torchvision.io.ImageReadMode.RGB
-        ).permute(1, 2, 0).numpy()  # [H, W, C]
+        ).permute(1, 2, 0).numpy()
 
-        # 2. Ben‑Graham（若未离线预处理）
+        # 2. 若未使用离线 Ben-Graham 预处理，则在线执行增强
         if not cfg.data.use_ben_offline:
             sigma = getattr(cfg.data, "ben_sigma", 10.0)
             img_rgb = ben_preprocess(img_rgb, sigma_x=sigma)
 
-        # 3. Albumentations 处理 → [C, H, W]
+        # 3. 使用 Albumentations 执行 Resize、Normalize、ToTensor
         img_tensor = self.tfms(image=img_rgb)["image"]
 
-        # 4. 删除旧版缩放代码后的最终输出
+        # 4. 提取图像标签
         label = torch.tensor(row[cfg.data.col_label], dtype=torch.long)
         return img_tensor, label

@@ -1,11 +1,11 @@
 import os
-
 import numpy as np
 import pandas as pd
 import torch
+
 from kornia.augmentation import Normalize as KNormalize
 from kornia.augmentation.auto import RandAugment
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchmetrics import MetricCollection
 from torchmetrics.classification import (
@@ -31,15 +31,19 @@ from src.utils import (
 
 def rand_bbox(size, lam):
     """
-    Generate a random bounding box for CutMix.
-    Args:
-        size: input tensor size (B, C, H, W)
-        lam: mixing ratio
-    Returns:
-        coordinates (bbx1, bby1, bbx2, bby2)
+    ─────────────────────────────────────────────────────────────────
+    生成 CutMix 的随机裁剪框。
+
+    参数:
+      size: 输入张量尺寸 (B, C, H, W)
+      lam: 混合比例 λ
+
+    返回:
+      bbx1, bby1, bbx2, bby2: 裁剪框左上和右下坐标
+    ─────────────────────────────────────────────────────────────────
     """
     w, h = size[3], size[2]
-    cut_rat = np.sqrt(1.0 - lam)  # Keep the same for bounding box size.
+    cut_rat = np.sqrt(1.0 - lam)
     cut_w, cut_h = int(w * cut_rat), int(h * cut_rat)
     cx = np.random.randint(w)
     cy = np.random.randint(h)
@@ -51,18 +55,32 @@ def rand_bbox(size, lam):
     return bbx1, bby1, bbx2, bby2
 
 
-# ─────────────────────────────────── main ──────────────────────────────────
+# ────────────────────────────────────── main ──────────────────────────────────────
 def main():
-    # 1. 随机种子与后端优化
+    """
+    训练脚本主流程：
+    1. 随机种子与后端优化
+    2. 创建输出目录
+    3. 读取并划分数据集
+    4. 设备选择
+    5. GPU 端 RandAugment 与 Normalize
+    6. 梯度累积设置
+    7. 构建 DataLoader
+    8. 构建模型、优化器、调度器、EMA
+    9. 训练循环
+    10. 调度器更新与验证
+    11. 保存最佳 checkpoint
+    """
+    # ──────────────── 1. 随机种子与后端优化 ────────────────
     seed_everything(cfg.train.seed)
     enable_backend_opt(cfg)
 
-    # 2. 输出目录
+    # ──────────────── 2. 创建输出目录 ────────────────
     os.makedirs(cfg.output.dir, exist_ok=True)
     ckpt_dir = os.path.join(cfg.output.dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    # 3. 读取数据并划分
+    # ──────────────── 3. 读取并划分数据集 ────────────────
     df = pd.read_csv(cfg.data.train_csv)
     train_df, val_df = split_dataframe(df, cfg.data.valid_ratio, cfg.train.seed)
 
@@ -71,24 +89,23 @@ def main():
     print(f"Train class distribution:\n", train_df[cfg.data.col_label].value_counts())
     print(f"Validation class distribution:\n", val_df[cfg.data.col_label].value_counts())
 
-    # 4. 设备设置
+    # ──────────────── 4. 设备选择 ────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 5. GPU RandAugment + Normalize (保持与验证集一致)
+    # ──────────────── 5. GPU RandAugment 与 Normalize ────────────────
     rand_aug_gpu = None
     gpu_normalize = None
     if getattr(cfg.train, "rand_aug_gpu", False):
         rand_aug_gpu = RandAugment(n=2, m=9).to(device)
         gpu_normalize = KNormalize(
-            mean=torch.tensor((0.485, 0.456, 0.406), device=device),  # 元组
-            std=torch.tensor((0.229, 0.224, 0.225), device=device),  # 元组
+            mean=torch.tensor((0.485, 0.456, 0.406), device=device),
+            std=torch.tensor((0.229, 0.224, 0.225), device=device),
         )
 
-    # 6. 梯度累积步数
+    # ──────────────── 6. 梯度累积设置 ────────────────
     accum_steps = getattr(cfg.train, "accum_steps", 1)
 
-    # 7. DataLoader
-    # 7.1 过采样开关
+    # ──────────────── 7. 构建 DataLoader ────────────────
     if cfg.train.use_oversampling:
         counts = train_df[cfg.data.col_label].value_counts().to_dict()
         sample_weights = train_df[cfg.data.col_label].map(
@@ -114,8 +131,6 @@ def main():
         pin_memory=True,
         persistent_workers=True,
     )
-
-    # 验证集 DataLoader（不打乱顺序）
     val_loader = DataLoader(
         RetinoDataset(val_df, train=False),
         shuffle=False,
@@ -126,21 +141,15 @@ def main():
         persistent_workers=True,
     )
 
-    # 8. 构建模型、优化器、调度器
+    # ──────────────── 8. 构建模型、优化器、调度器、EMA ────────────────
     model = build_model().to(device, memory_format=torch.channels_last)
     if cfg.train.compile:
         model = torch.compile(model, mode=cfg.train.compile_mode)
 
-    # 定义带类别权重和 label smoothing 的 CrossEntropyLoss
-    # 定义 Focal Loss (采样已平衡，无需再用 weight；gamma 设为 2.0)
-    # 计算类别权重（若启用）
     weight = None
     if cfg.train.use_class_weight:
         counts = train_df[cfg.data.col_label].value_counts().sort_index().values
         weight = torch.tensor(len(counts) / counts, dtype=torch.float32, device=device)
-        # 可选：平滑处理（如开平方）
-        # weight = torch.sqrt(weight)
-
     criterion = FocalLoss(
         gamma=getattr(cfg.train, "focal_gamma", 2.0),
         weight=weight
@@ -148,10 +157,9 @@ def main():
 
     optimizer = build_optimizer(model, cfg.train)
     scheduler = build_scheduler(optimizer, cfg.train)
-    scaler = GradScaler(enabled=torch.cuda.is_available())
+    scaler = GradScaler("cuda", enabled=torch.cuda.is_available())
 
     from timm.utils import ModelEmaV2
-
     ema = (
         ModelEmaV2(model, decay=cfg.train.ema_decay)
         if cfg.train.ema_decay
@@ -160,7 +168,7 @@ def main():
 
     best_val_f1 = 0.0
 
-    # 9. 训练循环
+    # ──────────────── 9. 训练循环 ────────────────
     for epoch in range(1, cfg.train.epochs + 1):
         model.train()
         loss_meter = AverageMeter()
@@ -173,21 +181,18 @@ def main():
         )
 
         for step, (imgs, labels) in enumerate(pbar, start=1):
-            imgs: torch.Tensor  # type hint
-            labels: torch.Tensor
-
-            imgs = imgs.to(device, non_blocking=True)
+            imgs = imgs.to(device, non_blocking=True) # type: ignore
             labels = labels.to(device, non_blocking=True)
 
-            # GPU RandAug + Normalize
-            if rand_aug_gpu is not None:
+            # GPU 端增强
+            if rand_aug_gpu:
                 imgs = rand_aug_gpu(imgs)
                 imgs = gpu_normalize(imgs)
 
+            # CutMix / MixUp 逻辑
             if cfg.train.cutmix_alpha > 0 and cfg.train.mixup_alpha > 0:
-                # 随机选择 CutMix 或 Mixup
                 if np.random.rand() < 0.5:
-                    # 应用 CutMix
+                    # CutMix
                     lam = np.random.beta(cfg.train.cutmix_alpha, cfg.train.cutmix_alpha)
                     perm = torch.randperm(imgs.size(0), device=device)
                     bbx1, bby1, bbx2, bby2 = rand_bbox(imgs.size(), lam)
@@ -195,55 +200,50 @@ def main():
                     lam = 1 - (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size(-1) * imgs.size(-2))
                     labels_a, labels_b = labels, labels[perm]
                 else:
-                    # 应用 Mixup
+                    # MixUp
                     lam = np.random.beta(cfg.train.mixup_alpha, cfg.train.mixup_alpha)
                     perm = torch.randperm(imgs.size(0), device=device)
                     imgs = lam * imgs + (1 - lam) * imgs[perm]
                     labels_a, labels_b = labels, labels[perm]
-
             elif cfg.train.cutmix_alpha > 0:
-                # CutMix处理
+                # CutMix 仅模式
                 lam = np.random.beta(cfg.train.cutmix_alpha, cfg.train.cutmix_alpha)
                 perm = torch.randperm(imgs.size(0), device=device)
                 bbx1, bby1, bbx2, bby2 = rand_bbox(imgs.size(), lam)
                 imgs[:, :, bby1:bby2, bbx1:bbx2] = imgs[perm, :, bby1:bby2, bbx1:bbx2]
-                lam = 1 - (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size(-1) * imgs.size(-2))  # 修正lambda计算
+                lam = 1 - (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size(-1) * imgs.size(-2))
                 labels_a, labels_b = labels, labels[perm]
-
-            elif cfg.train.mixup_alpha > 0:  # 修正条件为mixup_alpha
-                # MixUp处理
+            elif cfg.train.mixup_alpha > 0:
+                # MixUp 仅模式
                 lam = np.random.beta(cfg.train.mixup_alpha, cfg.train.mixup_alpha)
                 perm = torch.randperm(imgs.size(0), device=device)
                 imgs = lam * imgs + (1 - lam) * imgs[perm]
                 labels_a, labels_b = labels, labels[perm]
-
             else:
-                # 无混合增强
+                # 无混合
                 labels_a = labels
                 labels_b = labels
                 lam = 1.0
 
-            # 统一损失计算（无论是否使用增强）
-            with autocast():
+            # 损失与反向传播
+            with autocast(device_type='cuda'):
                 logits = model(imgs)
                 loss = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
 
             scaler.scale(loss).backward()
 
-            # 梯度累积：累满步数或最后一步才更新
+            # 梯度累积与 EMA 更新
             if step % accum_steps == 0 or step == len(train_loader):
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
-
                 if ema:
                     ema.update(model)
 
-            # 记录真实 loss
             loss_meter.update(loss.item() * accum_steps, n=imgs.shape[0])
             pbar.set_postfix(loss=loss_meter.avg)
 
-        # 10. 调度器 & 验证
+        # ──────────────── 10. 调度器更新与验证 ────────────────
         if cfg.train.scheduler == "plateau":
             eval_model = ema.module if ema else model
             val_metrics = _validate(eval_model, val_loader, device)
@@ -253,9 +253,7 @@ def main():
             eval_model = ema.module if ema else model
             val_metrics = _validate(eval_model, val_loader, device)
 
-        # 从 val_metrics 中提取标量 macro_f1
         val_macro_f1 = val_metrics['macro_f1'].item()
-        # 打印宏平均和每个类别指标
         print(f"Epoch {epoch} — Macro F1: {val_macro_f1:.4f}")
         for i in range(cfg.model.num_classes):
             p = val_metrics['precision'][i].item()
@@ -263,7 +261,7 @@ def main():
             f = val_metrics['f1'][i].item()
             print(f"    Class {i:>2} — Prec: {p:.4f}, Rec: {r:.4f}, F1: {f:.4f}")
 
-        # 11. 保存最优
+        # ──────────────── 11. 保存最佳 checkpoint ────────────────
         if val_macro_f1 > best_val_f1:
             best_val_f1 = val_macro_f1
             fname = f"best_{best_val_f1:.4f}.pt"
@@ -278,14 +276,16 @@ def main():
     print("Training completed.")
 
 
-# ───────────────────────────────── 验证函数 ───────────────────────────────
+# ─────────────────────────────── 验证函数 _validate ───────────────────────────────
 def _validate(model, loader, device):
-    # 定义一个指标集合：分别计算每个类的 Precision、Recall、F1，以及宏平均 F1
+    """
+    执行模型在验证集上的评估，返回各类别 Precision、Recall、F1 及宏平均 F1。
+    """
     metrics = MetricCollection({
         'precision': MulticlassPrecision(num_classes=cfg.model.num_classes, average=None),
-        'recall': MulticlassRecall(num_classes=cfg.model.num_classes, average=None),
-        'f1': MulticlassF1Score(num_classes=cfg.model.num_classes, average=None),
-        'macro_f1': MulticlassF1Score(num_classes=cfg.model.num_classes, average='macro'),
+        'recall':    MulticlassRecall(num_classes=cfg.model.num_classes, average=None),
+        'f1':        MulticlassF1Score(num_classes=cfg.model.num_classes, average=None),
+        'macro_f1':  MulticlassF1Score(num_classes=cfg.model.num_classes, average='macro'),
     }).to(device)
 
     model.eval()
@@ -293,17 +293,11 @@ def _validate(model, loader, device):
         for imgs, labels in loader:
             imgs = imgs.to(device)
             labels = labels.to(device)
-            with autocast():
+            with autocast(device_type='cuda'):
                 logits = model(imgs)
             preds = logits.argmax(dim=1)
             metrics.update(preds, labels)
 
-    # 返回一个 dict：{
-    #    'precision': Tensor[num_classes],
-    #    'recall':    Tensor[num_classes],
-    #    'f1':        Tensor[num_classes],
-    #    'macro_f1':  Tensor[]
-    # }
     return metrics.compute()
 
 
