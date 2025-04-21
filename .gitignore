@@ -27,11 +27,6 @@ venv/
 .env
 .local.env
 
-# --- 编译生成目录 ---
-build/
-dist/
-target/
-
 # --- 测试缓存 ---
 .pytest_cache/
 .mypy_cache/
