@@ -42,7 +42,7 @@ def crop_image_from_gray(img: np.ndarray, tol: int = 7) -> np.ndarray:
 
 
 def ben_preprocess(img: np.ndarray, sigma_x: float = 10.0) -> np.ndarray:
-    """Ben Graham 对比度增强：4*img – 4*GaussianBlur(img) + 128"""
+    """Ben Graham 对比度增强：4*img – 4*GaussianBlur(img) + 128"""
     img_cropped = crop_image_from_gray(img)
     blurred = cv2.GaussianBlur(img_cropped, (0, 0), sigma_x)
     return cv2.addWeighted(img_cropped, 4, blurred, -4, 128)
@@ -57,16 +57,26 @@ def _get_tfms(is_train: bool) -> Compose:
       否则直接插入 Normalize(mean=0.5, std=0.5)。
     """
     sz = cfg.train.img_size
-    tfms = [
-        Resize(sz, sz),
-        ToTensorV2()
-    ]
-    if not (is_train and cfg.train.rand_aug_gpu):
-        tfms.insert(1, Normalize(
-            mean=(0.485, 0.456, 0.406),  # 注意括号改成圆括号
-            std=(0.229, 0.224, 0.225)
-        ))
-    return Compose(tfms)
+    if is_train and cfg.train.rand_aug_gpu:
+        # 1) 先 Resize
+        # 2) Normalize(mean=0,std=1,max_pixel_value=255) 只做 /255 → [0,1]
+        # 3) ToTensorV2() → torch.float32
+        return Compose([
+            Resize(sz, sz),
+            Normalize(mean=(0.0, 0.0, 0.0),
+                      std=(1.0, 1.0, 1.0),
+                      max_pixel_value=255.0),
+            ToTensorV2(),
+        ])
+    else:
+        # 验证/CPU 增强时：直接做完整的 Normalize + ToTensor
+        return Compose([
+            Resize(sz, sz),
+            Normalize(mean=(0.485, 0.456, 0.406),
+                      std=(0.229, 0.224, 0.225),
+                      max_pixel_value=255.0),
+            ToTensorV2(),
+        ])
 
 
 class RetinoDataset(Dataset):
@@ -96,22 +106,16 @@ class RetinoDataset(Dataset):
         img_rgb = torchvision.io.decode_jpeg(
             torchvision.io.read_file(img_path),
             mode=torchvision.io.ImageReadMode.RGB
-        ).permute(1, 2, 0).numpy()
+        ).permute(1, 2, 0).numpy()  # [H, W, C]
 
         # 2. Ben‑Graham（若未离线预处理）
         if not cfg.data.use_ben_offline:
             sigma = getattr(cfg.data, "ben_sigma", 10.0)
             img_rgb = ben_preprocess(img_rgb, sigma_x=sigma)
 
-        # 3. Albumentations：Resize / (Normalize) / ToTensor
+        # 3. Albumentations 处理 → [C, H, W]
         img_tensor = self.tfms(image=img_rgb)["image"]
 
-        # 4. 确保 float32 & [0,1]，兼容不同版本 Albumentations
-        if img_tensor.dtype.is_floating_point:
-            if img_tensor.max() > 1.0:
-                img_tensor = img_tensor.div(255.0)
-        else:
-            img_tensor = img_tensor.float().div_(255.0)
-
+        # 4. 删除旧版缩放代码后的最终输出
         label = torch.tensor(row[cfg.data.col_label], dtype=torch.long)
         return img_tensor, label

@@ -1,4 +1,3 @@
-# utils.py
 import random
 import numpy as np
 import torch
@@ -6,6 +5,8 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR, StepLR, MultiStepLR, ExponentialLR, ReduceLROnPlateau
 )
+import torch.nn as nn
+import torch.nn.functional as f
 
 __all__ = [
     "seed_everything",
@@ -14,6 +15,7 @@ __all__ = [
     "enable_backend_opt",
     "build_optimizer",
     "build_scheduler",
+    "FocalLoss",
 ]
 
 
@@ -132,7 +134,7 @@ def build_scheduler(optimizer, cfg_train):
             main_scheduler = CosineAnnealingLR(
                 optimizer,
                 T_max=cfg_train.epochs - warmup_epochs,
-                eta_min=min_lr  # 新增min_lr支持
+                eta_min=min_lr
             )
         elif name == "step":
             main_scheduler = StepLR(
@@ -166,7 +168,7 @@ def build_scheduler(optimizer, cfg_train):
             return CosineAnnealingLR(
                 optimizer,
                 T_max=cfg_train.epochs,
-                eta_min=min_lr  # 应用min_lr参数
+                eta_min=min_lr
             )
         elif name == "step":
             return StepLR(
@@ -191,7 +193,25 @@ def build_scheduler(optimizer, cfg_train):
                 mode="max",
                 factor=getattr(cfg_train, "factor", 0.5),
                 patience=getattr(cfg_train, "patience", 3),
-                min_lr=min_lr  # 应用min_lr参数
+                min_lr=min_lr
             )
         else:
             raise ValueError(f"Unsupported scheduler: {name}")
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for multi-class classification.
+    gamma: focusing parameter; weight: per-class weights tensor.
+    """
+
+    def __init__(self, gamma: float = 2.0, weight: torch.Tensor | None = None):
+        super().__init__()
+        self.gamma = gamma
+        self.weight = weight
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce_loss = f.cross_entropy(logits, targets, weight=self.weight, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal = ((1 - pt) ** self.gamma) * ce_loss
+        return focal.mean()

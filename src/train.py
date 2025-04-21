@@ -1,18 +1,24 @@
 import os
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
 
+import numpy as np
 import pandas as pd
-from tqdm import tqdm
-from kornia.augmentation.auto import RandAugment
+import torch
 from kornia.augmentation import Normalize as KNormalize
+from kornia.augmentation.auto import RandAugment
+from torch.cuda.amp import autocast, GradScaler
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from torchmetrics import MetricCollection
+from torchmetrics.classification import (
+    MulticlassPrecision,
+    MulticlassRecall,
+    MulticlassF1Score,
+)
+from tqdm import tqdm
 
 from src.config import cfg
 from src.data.retino_dataset import RetinoDataset
 from src.models.build import build_model
+from src.utils import FocalLoss
 from src.utils import (
     seed_everything,
     split_dataframe,
@@ -62,6 +68,8 @@ def main():
 
     print(f"Training dataset size: {len(train_df)}")
     print(f"Validation dataset size: {len(val_df)}")
+    print(f"Train class distribution:\n", train_df[cfg.data.col_label].value_counts())
+    print(f"Validation class distribution:\n", val_df[cfg.data.col_label].value_counts())
 
     # 4. 设备设置
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -73,25 +81,49 @@ def main():
         rand_aug_gpu = RandAugment(n=2, m=9).to(device)
         gpu_normalize = KNormalize(
             mean=torch.tensor((0.485, 0.456, 0.406), device=device),  # 元组
-            std=torch.tensor((0.229, 0.224, 0.225), device=device),   # 元组
+            std=torch.tensor((0.229, 0.224, 0.225), device=device),  # 元组
         )
 
     # 6. 梯度累积步数
     accum_steps = getattr(cfg.train, "accum_steps", 1)
 
     # 7. DataLoader
-    dl_kwargs = dict(
+    # 7.1 过采样开关
+    if cfg.train.use_oversampling:
+        counts = train_df[cfg.data.col_label].value_counts().to_dict()
+        sample_weights = train_df[cfg.data.col_label].map(
+            lambda cls: 1.0 / counts[cls]
+        ).values
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+        shuffle = False
+    else:
+        sampler = None
+        shuffle = True
+
+    train_loader = DataLoader(
+        RetinoDataset(train_df, train=True),
+        sampler=sampler,
+        shuffle=shuffle,
         batch_size=cfg.train.batch_size,
         num_workers=cfg.train.num_workers,
         prefetch_factor=cfg.train.prefetch_factor,
         pin_memory=True,
         persistent_workers=True,
     )
-    train_loader = DataLoader(
-        RetinoDataset(train_df, train=True), shuffle=True, **dl_kwargs
-    )
+
+    # 验证集 DataLoader（不打乱顺序）
     val_loader = DataLoader(
-        RetinoDataset(val_df, train=False), shuffle=False, **dl_kwargs
+        RetinoDataset(val_df, train=False),
+        shuffle=False,
+        batch_size=cfg.train.batch_size,
+        num_workers=cfg.train.num_workers,
+        prefetch_factor=cfg.train.prefetch_factor,
+        pin_memory=True,
+        persistent_workers=True,
     )
 
     # 8. 构建模型、优化器、调度器
@@ -99,7 +131,21 @@ def main():
     if cfg.train.compile:
         model = torch.compile(model, mode=cfg.train.compile_mode)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=cfg.train.label_smoothing)
+    # 定义带类别权重和 label smoothing 的 CrossEntropyLoss
+    # 定义 Focal Loss (采样已平衡，无需再用 weight；gamma 设为 2.0)
+    # 计算类别权重（若启用）
+    weight = None
+    if cfg.train.use_class_weight:
+        counts = train_df[cfg.data.col_label].value_counts().sort_index().values
+        weight = torch.tensor(len(counts) / counts, dtype=torch.float32, device=device)
+        # 可选：平滑处理（如开平方）
+        # weight = torch.sqrt(weight)
+
+    criterion = FocalLoss(
+        gamma=getattr(cfg.train, "focal_gamma", 2.0),
+        weight=weight
+    )
+
     optimizer = build_optimizer(model, cfg.train)
     scheduler = build_scheduler(optimizer, cfg.train)
     scaler = GradScaler(enabled=torch.cuda.is_available())
@@ -200,18 +246,26 @@ def main():
         # 10. 调度器 & 验证
         if cfg.train.scheduler == "plateau":
             eval_model = ema.module if ema else model
-            val_f1 = _validate(eval_model, val_loader, device)
-            scheduler.step(metrics=val_f1)
+            val_metrics = _validate(eval_model, val_loader, device)
+            scheduler.step(metrics=val_metrics['macro_f1'])
         else:
             scheduler.step()
             eval_model = ema.module if ema else model
-            val_f1 = _validate(eval_model, val_loader, device)
+            val_metrics = _validate(eval_model, val_loader, device)
 
-        print(f"Epoch {epoch} — val F1: {val_f1:.4f}")
+        # 从 val_metrics 中提取标量 macro_f1
+        val_macro_f1 = val_metrics['macro_f1'].item()
+        # 打印宏平均和每个类别指标
+        print(f"Epoch {epoch} — Macro F1: {val_macro_f1:.4f}")
+        for i in range(cfg.model.num_classes):
+            p = val_metrics['precision'][i].item()
+            r = val_metrics['recall'][i].item()
+            f = val_metrics['f1'][i].item()
+            print(f"    Class {i:>2} — Prec: {p:.4f}, Rec: {r:.4f}, F1: {f:.4f}")
 
         # 11. 保存最优
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
+        if val_macro_f1 > best_val_f1:
+            best_val_f1 = val_macro_f1
             fname = f"best_{best_val_f1:.4f}.pt"
             torch.save(
                 (ema.module if ema else model).state_dict(),
@@ -226,21 +280,31 @@ def main():
 
 # ───────────────────────────────── 验证函数 ───────────────────────────────
 def _validate(model, loader, device):
-    from torchmetrics.classification import MulticlassF1Score
+    # 定义一个指标集合：分别计算每个类的 Precision、Recall、F1，以及宏平均 F1
+    metrics = MetricCollection({
+        'precision': MulticlassPrecision(num_classes=cfg.model.num_classes, average=None),
+        'recall': MulticlassRecall(num_classes=cfg.model.num_classes, average=None),
+        'f1': MulticlassF1Score(num_classes=cfg.model.num_classes, average=None),
+        'macro_f1': MulticlassF1Score(num_classes=cfg.model.num_classes, average='macro'),
+    }).to(device)
 
-    metric = MulticlassF1Score(
-        num_classes=cfg.model.num_classes, average="macro"
-    ).to(device)
-    model.eval()  # 进入评估模式
-    with torch.no_grad(), autocast():
+    model.eval()
+    with torch.no_grad():
         for imgs, labels in loader:
-            imgs = imgs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            preds = model(imgs).softmax(dim=1)
-            pred_labels = preds.argmax(dim=1)  # 获取预测类别索引
-            metric.update(pred_labels, labels)
+            imgs = imgs.to(device)
+            labels = labels.to(device)
+            with autocast():
+                logits = model(imgs)
+            preds = logits.argmax(dim=1)
+            metrics.update(preds, labels)
 
-    return metric.compute().item()
+    # 返回一个 dict：{
+    #    'precision': Tensor[num_classes],
+    #    'recall':    Tensor[num_classes],
+    #    'f1':        Tensor[num_classes],
+    #    'macro_f1':  Tensor[]
+    # }
+    return metrics.compute()
 
 
 if __name__ == "__main__":

@@ -6,18 +6,22 @@ model:
 
 train:
   img_size: 384
-  epochs: 30
+  epochs: 60
 
-  mixup_alpha: 0.0     # 关闭 Mixup
+  mixup_alpha: 0.2     # 关闭 Mixup
   cutmix_alpha: 0.0    # 关闭 Cutmix
-  rand_aug_m: 9        # 降低 RandAug 强度
+  rand_aug_m: 5        # 降低 RandAug 强度
   rand_aug_n: 2
+
+  use_oversampling: true   # 启用过采样
+  use_class_weight: false   # 启用类别权重
 
   # -------- batch / lr --------
   batch_size: 16              # 最大 batch size 为 16
-  accum_steps: 4             # 等效全局 batch = 16
-  lr: 0.00002                 # 线性缩放后的学习率：1e-3 * 16 / 4096 = 0.0004
+  accum_steps: 1             # 等效全局 batch = 16
+  lr: 0.00005
   warmup_epochs: 5           # timm 调度器用
-  weight_decay: 0.0001         # 降低正则化
-  warmup_lr: 0.0000002      # 新增参数
-  min_lr: 0.000002          # 新增参数
+  weight_decay: 0.00001         # 降低正则化
+  warmup_lr: 0.000001      # 新增参数
+  min_lr: 0.00001          # 新增参数
+  focal_gamma: 1.5

@@ -29,6 +29,10 @@ train:
   mixup_alpha: 0.4
   cutmix_alpha: 1.0
   ema_decay: 0.9999
+  focal_gamma: 0
+
+  use_oversampling: false   # 是否启用过采样（WeightedRandomSampler）
+  use_class_weight: false   # 是否在损失函数中使用类别权重
 
 output:
   dir: "output"
