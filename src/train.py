@@ -26,31 +26,8 @@ from src.utils import (
     enable_backend_opt,
     build_optimizer,
     build_scheduler,
+    apply_mixup_cutmix,
 )
-
-
-def rand_bbox(size, lam):
-    """
-    Generate a random bounding box for CutMix.
-
-    Args:
-      size: input tensor dimensions (B, C, H, W)
-      lam: mix ratio λ
-
-    Returns:
-      bbx1, bby1, bbx2, bby2: top-left and bottom-right coordinates of the crop box
-    """
-    w, h = size[3], size[2]
-    cut_rat = np.sqrt(1.0 - lam)
-    cut_w, cut_h = int(w * cut_rat), int(h * cut_rat)
-    cx = np.random.randint(w)
-    cy = np.random.randint(h)
-
-    bbx1 = np.clip(cx - cut_w // 2, 0, w)
-    bby1 = np.clip(cy - cut_h // 2, 0, h)
-    bbx2 = np.clip(cx + cut_w // 2, 0, w)
-    bby2 = np.clip(cy + cut_h // 2, 0, h)
-    return bbx1, bby1, bbx2, bby2
 
 
 # ────────────────────────────────────── main ──────────────────────────────────────
@@ -150,14 +127,40 @@ def main():
     if cfg.train.compile:
         model = torch.compile(model, mode=cfg.train.compile_mode)
 
-    weight = None
-    if cfg.train.use_class_weight:
-        counts = train_df[cfg.data.col_label].value_counts().sort_index().values
-        weight = torch.tensor(len(counts) / counts, dtype=torch.float32, device=device)
-    criterion = FocalLoss(
-        gamma=getattr(cfg.train, "focal_gamma", 2.0),
-        weight=weight
-    )
+    # Layer-wise fine-tuning: freeze backbone parameters for the first `freeze_epochs`
+    freeze_epochs = getattr(cfg.train, "freeze_epochs", 0)
+    if freeze_epochs > 0:
+        print(f"Freezing backbone parameters for the first {freeze_epochs} epochs")
+        for name, param in model.named_parameters():
+            # Only keep the classification head trainable initially
+            if not name.startswith("head."):
+                param.requires_grad = False    # Layer-wise fine-tuning: freeze backbone parameters
+
+    # Class‑Balanced Loss
+    # Reference: “Class‑Balanced Loss Based on Effective Number of Samples”
+    # https://arxiv.org/abs/1901.05555
+    if getattr(cfg.train, "use_cb_loss", False):
+        # 1) Count the number of samples for each class
+        counts = train_df[cfg.data.col_label].value_counts().sort_index().values.astype(np.float32)
+        # 2) Set β (typically between 0.9–0.9999), specified in config: cfg.train.cb_beta
+        beta = getattr(cfg.train, "cb_beta", 0.9999)
+        # 3) Compute effective number of samples: E_n = (1 - βⁿ) / (1 - β)
+        effective_num = 1.0 - np.power(beta, counts)
+        weights = (1.0 - beta) / (effective_num + 1e-8)
+        # 4) Normalize the weights so that ∑w_i = number of classes
+        weights = weights / np.sum(weights) * len(weights)
+        weight = torch.tensor(weights, dtype=torch.float32, device=device)
+        # 5) Construct CB + Focal Loss
+        criterion = FocalLoss(
+            gamma=getattr(cfg.train, "focal_gamma", 2.0),
+            weight=weight
+        )
+    else:
+        # Original FocalLoss (without class weighting)
+        criterion = FocalLoss(
+            gamma=getattr(cfg.train, "focal_gamma", 2.0),
+            weight=None
+        )
 
     optimizer = build_optimizer(model, cfg.train)
     scheduler = build_scheduler(optimizer, cfg.train)
@@ -176,6 +179,12 @@ def main():
 
     # ──────────────── 9. Training Loop ────────────────
     for epoch in range(1, cfg.train.epochs + 1):
+        if freeze_epochs > 0 and epoch == freeze_epochs + 1:
+            print("Unfreezing backbone parameters and rebuilding optimizer/scheduler")
+            for param in model.parameters():
+                param.requires_grad = True
+            optimizer = build_optimizer(model, cfg.train)
+            scheduler = build_scheduler(optimizer, cfg.train)
         model.train()
         loss_meter = AverageMeter()
         optimizer.zero_grad(set_to_none=True)
@@ -196,40 +205,12 @@ def main():
                 imgs = gpu_normalize(imgs)
 
             # Handle CutMix / MixUp logic
-            if cfg.train.cutmix_alpha > 0 and cfg.train.mixup_alpha > 0:
-                if np.random.rand() < 0.5:
-                    # CutMix
-                    lam = np.random.beta(cfg.train.cutmix_alpha, cfg.train.cutmix_alpha)
-                    perm = torch.randperm(imgs.size(0), device=device)
-                    bbx1, bby1, bbx2, bby2 = rand_bbox(imgs.size(), lam)
-                    imgs[:, :, bby1:bby2, bbx1:bbx2] = imgs[perm, :, bby1:bby2, bbx1:bbx2]
-                    lam = 1 - (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size(-1) * imgs.size(-2))
-                    labels_a, labels_b = labels, labels[perm]
-                else:
-                    # MixUp
-                    lam = np.random.beta(cfg.train.mixup_alpha, cfg.train.mixup_alpha)
-                    perm = torch.randperm(imgs.size(0), device=device)
-                    imgs = lam * imgs + (1 - lam) * imgs[perm]
-                    labels_a, labels_b = labels, labels[perm]
-            elif cfg.train.cutmix_alpha > 0:
-                # CutMix only
-                lam = np.random.beta(cfg.train.cutmix_alpha, cfg.train.cutmix_alpha)
-                perm = torch.randperm(imgs.size(0), device=device)
-                bbx1, bby1, bbx2, bby2 = rand_bbox(imgs.size(), lam)
-                imgs[:, :, bby1:bby2, bbx1:bbx2] = imgs[perm, :, bby1:bby2, bbx1:bbx2]
-                lam = 1 - (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size(-1) * imgs.size(-2))
-                labels_a, labels_b = labels, labels[perm]
-            elif cfg.train.mixup_alpha > 0:
-                # MixUp only
-                lam = np.random.beta(cfg.train.mixup_alpha, cfg.train.mixup_alpha)
-                perm = torch.randperm(imgs.size(0), device=device)
-                imgs = lam * imgs + (1 - lam) * imgs[perm]
-                labels_a, labels_b = labels, labels[perm]
-            else:
-                # No mixing
-                labels_a = labels
-                labels_b = labels
-                lam = 1.0
+            imgs, labels_a, labels_b, lam = apply_mixup_cutmix(
+                imgs,
+                labels,
+                cutmix_alpha=cfg.train.cutmix_alpha,
+                mixup_alpha=cfg.train.mixup_alpha,
+            )
 
             # Compute loss and backpropagation
             with autocast(device_type='cuda'):
@@ -280,25 +261,24 @@ def main():
                 interval_fname = f"interval_{interval_idx}_best_{interval_best_f1:.4f}.pt"
                 torch.save(interval_best_state, os.path.join(ckpt_dir, interval_fname))
                 interval_files.append(interval_fname)
-                # Remove older interval checkpoints beyond save_top_k
-                while len(interval_files) > cfg.output.save_top_k:
-                    old_file = interval_files.pop(0)
-                    os.remove(os.path.join(ckpt_dir, old_file))
             # Reset interval tracking for the next period
             interval_best_f1 = 0.0
             interval_best_state = None
 
-        # ──────────────── 12. Save best-performing checkpoint (by macro F1 score) ────────────────
-        if val_macro_f1 > best_val_f1:
-            best_val_f1 = val_macro_f1
-            fname = f"best_{best_val_f1:.4f}.pt"
-            torch.save(
-                (ema.module if ema else model).state_dict(),
-                os.path.join(ckpt_dir, fname),
-            )
-            files = sorted(os.listdir(ckpt_dir))
-            while len(files) > cfg.output.save_top_k:
-                os.remove(os.path.join(ckpt_dir, files.pop(0)))
+            # ──────────────── 12. Save best-performing checkpoint (by macro F1 score) ────────────────
+            if val_macro_f1 > best_val_f1:
+                best_val_f1 = val_macro_f1
+                fname = f"best_{best_val_f1:.4f}.pt"
+                torch.save(
+                    (ema.module if ema else model).state_dict(),
+                    os.path.join(ckpt_dir, fname),
+                )
+                # ---- only prune global-best checkpoints, leave interval_*.pt alone ----
+                best_files = sorted(f for f in os.listdir(ckpt_dir) if f.startswith("best_"))
+                # if there are more than save_top_k global-best files, delete the oldest ones
+                while len(best_files) > cfg.output.save_top_k:
+                    old = best_files.pop(0)
+                    os.remove(os.path.join(ckpt_dir, old))
 
     print("Training completed.")
 

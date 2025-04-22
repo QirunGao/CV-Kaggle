@@ -6,16 +6,16 @@ model:
 
 # ───────────────────── Training Parameters Configuration ─────────────────────
 train:
-  img_size: 384           # Input image size
-  epochs: 30              # Number of training epochs
+  img_size: 384               # Input image size
+  epochs: 30                  # Number of training epochs
 
-  mixup_alpha: 0.2        # Mixup ratio (set to 0 to disable)
-  cutmix_alpha: 0.0       # CutMix ratio (set to 0 to disable)
-  rand_aug_m: 5           # RandAug strength (m value)
-  rand_aug_n: 2           # Number of RandAug operations (n value)
+  mixup_alpha: 0.2            # Mixup ratio (set to 0 to disable)
+  cutmix_alpha: 0.0           # CutMix ratio (set to 0 to disable)
+  rand_aug_m: 5               # RandAug strength (m value)
+  rand_aug_n: 2               # Number of RandAug operations (n value)
 
-  use_oversampling: true      # Enable class‑balanced sampling (WeightedRandomSampler)
-  use_class_weight: false     # Do not use class weights in the loss
+  use_oversampling: false     # Enable class‑balanced sampling (WeightedRandomSampler)
+  use_class_weight: true      # Use class weights in the loss
 
   # ─── Batch Size / Learning Rate Settings ───
   batch_size: 16              # Maximum per‑GPU batch size
@@ -26,6 +26,8 @@ train:
   # ─── Warmup and Scheduler Parameters ───
   warmup_epochs: 5            # Number of warmup epochs
   warmup_lr: 0.000001         # Warmup starting learning rate
+  freeze_epochs: 5            # Freeze the backbone for the first 5 epochs; train only the classification head
   min_lr: 0.00001             # Minimum learning rate
-
+  use_cb_loss: true           # Enable Class-Balanced Loss
+  cb_beta: 0.9999             # Beta parameter for effective number calculation
   focal_gamma: 1.5            # Gamma parameter for Focal Loss

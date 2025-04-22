@@ -17,7 +17,69 @@ __all__ = [
     "build_optimizer",
     "build_scheduler",
     "FocalLoss",
+    "apply_mixup_cutmix",
 ]
+
+
+def rand_bbox(size, lam):
+    """
+    Generate a random bounding box for CutMix.
+
+    Args:
+      size: input tensor dimensions (B, C, H, W)
+      lam: mix ratio λ
+
+    Returns:
+      bbx1, bby1, bbx2, bby2: top-left and bottom-right coordinates of the crop box
+    """
+    w, h = size[3], size[2]
+    cut_rat = np.sqrt(1.0 - lam)
+    cut_w, cut_h = int(w * cut_rat), int(h * cut_rat)
+    cx = np.random.randint(w)
+    cy = np.random.randint(h)
+
+    bbx1 = np.clip(cx - cut_w // 2, 0, w)
+    bby1 = np.clip(cy - cut_h // 2, 0, h)
+    bbx2 = np.clip(cx + cut_w // 2, 0, w)
+    bby2 = np.clip(cy + cut_h // 2, 0, h)
+    return bbx1, bby1, bbx2, bby2
+
+
+def apply_mixup_cutmix(imgs: torch.Tensor,
+                       labels: torch.Tensor,
+                       cutmix_alpha: float = 0.0,
+                       mixup_alpha: float = 0.0):
+    """
+    Choose to apply CutMix or MixUp based on probability and alpha values.
+    Returns processed imgs, labels_a, labels_b, and λ.
+    """
+    if cutmix_alpha > 0 and mixup_alpha > 0 and np.random.rand() < 0.5:
+        # Apply CutMix
+        lam = np.random.beta(cutmix_alpha, cutmix_alpha)
+        perm = torch.randperm(imgs.size(0), device=imgs.device)
+        bbx1, bby1, bbx2, bby2 = rand_bbox(imgs.size(), lam)
+        imgs[:, :, bby1:bby2, bbx1:bbx2] = imgs[perm, :, bby1:bby2, bbx1:bbx2]
+        lam = 1 - (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size(-1) * imgs.size(-2))
+        labels_a, labels_b = labels, labels[perm]
+    elif cutmix_alpha > 0:
+        # Apply only CutMix
+        lam = np.random.beta(cutmix_alpha, cutmix_alpha)
+        perm = torch.randperm(imgs.size(0), device=imgs.device)
+        bbx1, bby1, bbx2, bby2 = rand_bbox(imgs.size(), lam)
+        imgs[:, :, bby1:bby2, bbx1:bbx2] = imgs[perm, :, bby1:bby2, bbx1:bbx2]
+        lam = 1 - (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size(-1) * imgs.size(-2))
+        labels_a, labels_b = labels, labels[perm]
+    elif mixup_alpha > 0:
+        # Apply only MixUp
+        lam = np.random.beta(mixup_alpha, mixup_alpha)
+        perm = torch.randperm(imgs.size(0), device=imgs.device)
+        imgs = lam * imgs + (1 - lam) * imgs[perm]
+        labels_a, labels_b = labels, labels[perm]
+    else:
+        # No mixing applied
+        lam = 1.0
+        labels_a = labels_b = labels
+    return imgs, labels_a, labels_b, lam
 
 
 def seed_everything(seed: int = 42):
