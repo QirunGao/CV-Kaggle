@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 
 from kornia.augmentation import Normalize as KNormalize
 from kornia.augmentation.auto import RandAugment
@@ -12,6 +13,8 @@ from torchmetrics.classification import (
     MulticlassPrecision,
     MulticlassRecall,
     MulticlassF1Score,
+    BinaryAUROC,
+    BinaryF1Score,
 )
 from tqdm import tqdm
 
@@ -47,21 +50,19 @@ def main():
     11. Save best model for each interval
     12. Save overall best checkpoint
     """
-    # ──────────────── 1. Set random seed and enable backend optimizations ────────────────
+    # 1. Set random seed and enable backend optimizations
     seed_everything(cfg.train.seed)
     enable_backend_opt(cfg)
 
-    # ──────────────── 2. Prepare output directory and initialize interval parameters ────────────────
+    # 2. Prepare output directory and initialize interval parameters
     os.makedirs(cfg.output.dir, exist_ok=True)
     ckpt_dir = os.path.join(cfg.output.dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
-    # Number of epochs between saving the best interval checkpoint
     save_interval = cfg.output.get("save_interval", 1)
-    # Track best F1 and state for the current interval
     interval_best_f1 = 0.0
     interval_best_state = None
 
-    # ──────────────── 3. Read and split the dataset ────────────────
+    # 3. Read and split the dataset
     df = pd.read_csv(cfg.data.train_csv)
     train_df, val_df = split_dataframe(df, cfg.data.valid_ratio, cfg.train.seed)
 
@@ -70,10 +71,10 @@ def main():
     print(f"Train class distribution:\n", train_df[cfg.data.col_label].value_counts())
     print(f"Validation class distribution:\n", val_df[cfg.data.col_label].value_counts())
 
-    # ──────────────── 4. Device selection ────────────────
+    # 4. Device selection
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # ──────────────── 5. GPU-side RandAugment and Normalize ────────────────
+    # 5. GPU-side RandAugment and Normalize
     rand_aug_gpu = None
     gpu_normalize = None
     if getattr(cfg.train, "rand_aug_gpu", False):
@@ -83,10 +84,10 @@ def main():
             std=torch.tensor((0.229, 0.224, 0.225), device=device),
         )
 
-    # ──────────────── 6. Gradient accumulation setup ────────────────
+    # 6. Gradient accumulation setup
     accum_steps = getattr(cfg.train, "accum_steps", 1)
 
-    # ──────────────── 7. Build DataLoaders ────────────────
+    # 7. Build DataLoaders
     if cfg.train.use_oversampling:
         counts = train_df[cfg.data.col_label].value_counts().to_dict()
         sample_weights = train_df[cfg.data.col_label].map(
@@ -122,45 +123,67 @@ def main():
         persistent_workers=True,
     )
 
-    # ──────────────── 8. Build model, optimizer, scheduler, EMA ────────────────
+    # 8. Build model, optimizer, scheduler, and EMA
     model = build_model().to(device, memory_format=torch.channels_last)
     if cfg.train.compile:
         model = torch.compile(model, mode=cfg.train.compile_mode)
 
-    # Layer-wise fine-tuning: freeze backbone parameters for the first `freeze_epochs`
     freeze_epochs = getattr(cfg.train, "freeze_epochs", 0)
     if freeze_epochs > 0:
         print(f"Freezing backbone parameters for the first {freeze_epochs} epochs")
         for name, param in model.named_parameters():
-            # Only keep the classification head trainable initially
-            if not name.startswith("head."):
-                param.requires_grad = False    # Layer-wise fine-tuning: freeze backbone parameters
+            if "head_bin" not in name and "head_sev" not in name:
+                param.requires_grad = False
 
-    # Class‑Balanced Loss
-    # Reference: “Class‑Balanced Loss Based on Effective Number of Samples”
-    # https://arxiv.org/abs/1901.05555
+    # ───────── Binary head loss ─────────
+    # If cfg.train.use_cb_loss == True → use CB Loss (Effective Number) + Focal Loss
+    # Otherwise, keep using standard Cross Entropy
+
     if getattr(cfg.train, "use_cb_loss", False):
-        # 1) Count the number of samples for each class
-        counts = train_df[cfg.data.col_label].value_counts().sort_index().values.astype(np.float32)
-        # 2) Set β (typically between 0.9–0.9999), specified in config: cfg.train.cb_beta
+        # 0 = healthy, 1 = diseased
+        neg_cnt = (train_df[cfg.data.col_label] == 0).sum()
+        pos_cnt = (train_df[cfg.data.col_label] > 0).sum()
+        counts_bin = np.array([neg_cnt, pos_cnt], dtype=np.float32)
+
         beta = getattr(cfg.train, "cb_beta", 0.9999)
-        # 3) Compute effective number of samples: E_n = (1 - βⁿ) / (1 - β)
-        effective_num = 1.0 - np.power(beta, counts)
-        weights = (1.0 - beta) / (effective_num + 1e-8)
-        # 4) Normalize the weights so that ∑w_i = number of classes
-        weights = weights / np.sum(weights) * len(weights)
-        weight = torch.tensor(weights, dtype=torch.float32, device=device)
-        # 5) Construct CB + Focal Loss
-        criterion = FocalLoss(
+        eff_num = 1.0 - np.power(beta, counts_bin)
+        weights_bin = (1.0 - beta) / (eff_num + 1e-8)
+        weights_bin = weights_bin / np.sum(weights_bin) * len(weights_bin)
+        weight_bin = torch.tensor(weights_bin, dtype=torch.float32, device=device)
+
+        criterion_bin = FocalLoss(  # ← Binary Focal Loss with CB-weighting
             gamma=getattr(cfg.train, "focal_gamma", 2.0),
-            weight=weight
+            weight=weight_bin,
         )
     else:
-        # Original FocalLoss (without class weighting)
-        criterion = FocalLoss(
-            gamma=getattr(cfg.train, "focal_gamma", 2.0),
-            weight=None
+        criterion_bin = nn.CrossEntropyLoss()  # ← Keep original logic
+
+    if getattr(cfg.train, "use_cb_loss", False):
+        # Count only severity levels 1-4 for severity weights
+        counts = (
+            train_df.loc[train_df[cfg.data.col_label] > 0, cfg.data.col_label]
+            .sub(1)
+            .value_counts()
+            .sort_index()
+            .values.astype(np.float32)
         )
+        beta = getattr(cfg.train, "cb_beta", 0.9999)
+        eff_num = 1.0 - np.power(beta, counts)
+        weights = (1.0 - beta) / (eff_num + 1e-8)
+        weights = weights / np.sum(weights) * len(weights)
+        weight_sev = torch.tensor(weights, dtype=torch.float32, device=device)
+    else:
+        weight_sev = None
+
+    # Severity loss (computed only on diseased samples)
+    criterion_sev = FocalLoss(
+        gamma=getattr(cfg.train, "focal_gamma", 2.0),
+        weight=weight_sev,
+    )
+
+    lambda_sev_final = getattr(cfg.train, "lambda_sev", 0.5)
+    lambda_sev_start = getattr(cfg.train, "lambda_sev_start", lambda_sev_final)
+    lambda_sev_warmup = getattr(cfg.train, "lambda_sev_warmup_epochs", 0)
 
     optimizer = build_optimizer(model, cfg.train)
     scheduler = build_scheduler(optimizer, cfg.train)
@@ -174,10 +197,9 @@ def main():
     )
 
     best_val_f1 = 0.0
-    # List to keep saved interval checkpoint filenames
     interval_files = []
 
-    # ──────────────── 9. Training Loop ────────────────
+    # 9. Training Loop
     for epoch in range(1, cfg.train.epochs + 1):
         if freeze_epochs > 0 and epoch == freeze_epochs + 1:
             print("Unfreezing backbone parameters and rebuilding optimizer/scheduler")
@@ -185,6 +207,10 @@ def main():
                 param.requires_grad = True
             optimizer = build_optimizer(model, cfg.train)
             scheduler = build_scheduler(optimizer, cfg.train)
+        if lambda_sev_warmup > 0 and epoch <= lambda_sev_warmup:
+            lambda_sev_curr = lambda_sev_start + (lambda_sev_final - lambda_sev_start) * (epoch - 1) / lambda_sev_warmup
+        else:
+            lambda_sev_curr = lambda_sev_final
         model.train()
         loss_meter = AverageMeter()
         optimizer.zero_grad(set_to_none=True)
@@ -212,10 +238,35 @@ def main():
                 mixup_alpha=cfg.train.mixup_alpha,
             )
 
-            # Compute loss and backpropagation
-            with autocast(device_type='cuda'):
-                logits = model(imgs)
-                loss = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
+            # Binary classification & severity labels
+            labels_bin_a = (labels_a > 0).long()
+            labels_bin_b = (labels_b > 0).long()
+            labels_sev_a = torch.clamp(labels_a - 1, min=0)
+            labels_sev_b = torch.clamp(labels_b - 1, min=0)
+
+            with autocast(device_type="cuda"):
+                logit_bin, logit_sev = model(imgs)
+
+                # Binary loss
+                loss_bin = (
+                        lam * criterion_bin(logit_bin, labels_bin_a)
+                        + (1 - lam) * criterion_bin(logit_bin, labels_bin_b)
+                )
+
+                # Severity loss (computed only on diseased samples)
+                loss_sev = torch.tensor(0.0, device=device)
+                mask_a = labels_bin_a.bool()
+                mask_b = labels_bin_b.bool()
+                if mask_a.any():
+                    loss_sev += lam * criterion_sev(
+                        logit_sev[mask_a], labels_sev_a[mask_a]
+                    )
+                if mask_b.any():
+                    loss_sev += (1 - lam) * criterion_sev(
+                        logit_sev[mask_b], labels_sev_b[mask_b]
+                    )
+
+                loss = loss_bin + lambda_sev_curr * loss_sev
 
             scaler.scale(loss).backward()
 
@@ -230,7 +281,7 @@ def main():
             loss_meter.update(loss.item() * accum_steps, n=imgs.shape[0])
             pbar.set_postfix(loss=loss_meter.avg)
 
-        # ──────────────── 10. Scheduler step & validation metrics ────────────────
+        # 10. Scheduler step & validation metrics
         if cfg.train.scheduler == "plateau":
             eval_model = ema.module if ema else model
             val_metrics = _validate(eval_model, val_loader, device)
@@ -241,31 +292,37 @@ def main():
             val_metrics = _validate(eval_model, val_loader, device)
 
         val_macro_f1 = val_metrics['macro_f1'].item()
-        print(f"Epoch {epoch} — Macro F1: {val_macro_f1:.4f}")
+        bin_f1 = val_metrics['bin_f1'].item()
+        bin_auc = val_metrics['bin_auc'].item()
+        sev_f1 = val_metrics['sev_macro_f1'].item()
+
+        print(f"Epoch {epoch}")
+        print(f"  • λ_sev (curr)  : {lambda_sev_curr:.4f}")
+        print(f"  • 5-class Macro F1 : {val_macro_f1:.4f}")
+        print(f"  • Binary F1       : {bin_f1:.4f}")
+        print(f"  • Binary ROC-AUC  : {bin_auc:.4f}")
+        print(f"  • Severity Macro F1: {sev_f1:.4f}")
         for i in range(cfg.model.num_classes):
             p = val_metrics['precision'][i].item()
             r = val_metrics['recall'][i].item()
             f = val_metrics['f1'][i].item()
             print(f"    Class {i:>2} — Prec: {p:.4f}, Rec: {r:.4f}, F1: {f:.4f}")
 
-        # ──────────────── 11. Interval-based checkpoint saving ────────────────
-        # Update interval best if current F1 exceeds previous best in this interval
+        # 11. Interval-based checkpoint saving
         if val_macro_f1 > interval_best_f1:
             interval_best_f1 = val_macro_f1
             interval_best_state = (ema.module if ema else model).state_dict()
 
-        # At the end of each interval or the final epoch, save the best interval model
         if epoch % save_interval == 0 or epoch == cfg.train.epochs:
             if interval_best_state is not None:
                 interval_idx = (epoch - 1) // save_interval + 1
                 interval_fname = f"interval_{interval_idx}_best_{interval_best_f1:.4f}.pt"
                 torch.save(interval_best_state, os.path.join(ckpt_dir, interval_fname))
                 interval_files.append(interval_fname)
-            # Reset interval tracking for the next period
             interval_best_f1 = 0.0
             interval_best_state = None
 
-            # ──────────────── 12. Save best-performing checkpoint (by macro F1 score) ────────────────
+            # 12. Save best-performing checkpoint (by macro F1 score)
             if val_macro_f1 > best_val_f1:
                 best_val_f1 = val_macro_f1
                 fname = f"best_{best_val_f1:.4f}.pt"
@@ -273,9 +330,7 @@ def main():
                     (ema.module if ema else model).state_dict(),
                     os.path.join(ckpt_dir, fname),
                 )
-                # ---- only prune global-best checkpoints, leave interval_*.pt alone ----
                 best_files = sorted(f for f in os.listdir(ckpt_dir) if f.startswith("best_"))
-                # if there are more than save_top_k global-best files, delete the oldest ones
                 while len(best_files) > cfg.output.save_top_k:
                     old = best_files.pop(0)
                     os.remove(os.path.join(ckpt_dir, old))
@@ -296,11 +351,20 @@ def _validate(model, loader, device):
     -------
     A dictionary containing metric tensors.
     """
-    metrics = MetricCollection({
+    metrics5 = MetricCollection({
         'precision': MulticlassPrecision(num_classes=cfg.model.num_classes, average=None),
         'recall': MulticlassRecall(num_classes=cfg.model.num_classes, average=None),
         'f1': MulticlassF1Score(num_classes=cfg.model.num_classes, average=None),
         'macro_f1': MulticlassF1Score(num_classes=cfg.model.num_classes, average='macro'),
+    }).to(device)
+
+    metrics_bin = MetricCollection({
+        'bin_f1': BinaryF1Score(),
+        'bin_auc': BinaryAUROC(),
+    }).to(device)
+
+    metrics_sev = MetricCollection({
+        'sev_macro_f1': MulticlassF1Score(num_classes=4, average='macro'),
     }).to(device)
 
     model.eval()
@@ -309,11 +373,30 @@ def _validate(model, loader, device):
             imgs = imgs.to(device)
             labels = labels.to(device)
             with autocast(device_type='cuda'):
-                logits = model(imgs)
-            preds = logits.argmax(dim=1)
-            metrics.update(preds, labels)
+                logit_bin, logit_sev = model(imgs)
 
-    return metrics.compute()
+            preds5 = torch.where(
+                logit_bin.argmax(dim=1) == 0,
+                torch.zeros_like(labels),
+                logit_sev.argmax(dim=1) + 1,
+            )
+            labels_bin = (labels > 0).long()
+            preds_bin = (preds5 > 0).long()
+
+            mask = (labels_bin.bool())
+            if mask.any():
+                labels_sev = labels[mask].sub(1)  # 0-3
+                preds_sev = logit_sev.argmax(dim=1)[mask]  # 0-3
+                metrics_sev.update(preds_sev, labels_sev)
+
+            metrics_bin.update(preds_bin, labels_bin)
+            metrics5.update(preds5, labels)
+
+    out = {}
+    out.update(metrics5.compute())
+    out.update(metrics_bin.compute())
+    out.update(metrics_sev.compute())
+    return out
 
 
 if __name__ == "__main__":

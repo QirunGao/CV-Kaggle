@@ -41,8 +41,6 @@ train:
   warmup_epochs: 5                            # Number of epochs for learning rate warmup
   freeze_epochs: 5                            # Layer-wise fine-tuning: freeze backbone for the first X epochs
 
-  label_smoothing: 0.1                        # Amount of label smoothing to apply to targets
-
   scheduler: "cosine"                         # Learning rate scheduler type (cosine annealing)
 
   mixup_alpha: 0.2                            # Alpha parameter for Mixup data augmentation
@@ -50,7 +48,6 @@ train:
   ema_decay: 0.9999                           # Exponential moving average decay for model weights
 
   use_oversampling: true                      # Enable oversampling of minority classes to balance dataset
-  use_class_weight: false                     # Enable weighting the loss by class frequencies
 
   use_cb_loss: true                           # Enable Class-Balanced Loss
   cb_beta: 0.9999                             # Beta parameter for effective number calculation
