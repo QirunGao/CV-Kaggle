@@ -18,6 +18,7 @@ __all__ = [
     "build_scheduler",
     "FocalLoss",
     "apply_mixup_cutmix",
+    "BalancedSoftmaxCE",
 ]
 
 
@@ -106,6 +107,10 @@ def enable_backend_opt(cfg):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision("high")
+
+    if torch.cuda.is_available():
+        torch.backends.cuda.enable_flash_sdp(True)  # Flash kernel
+    torch.backends.cuda.enable_mem_efficient_sdp(True)  # 回退
 
 
 def split_dataframe(df, valid_ratio: float = 0.15, seed: int = 42):
@@ -317,3 +322,22 @@ class FocalLoss(nn.Module):
         ce_loss = f.cross_entropy(logits, targets, weight=self.weight, reduction="none")
         pt = torch.exp(-ce_loss)
         return ((1 - pt) ** self.gamma * ce_loss).mean()
+
+
+class BalancedSoftmaxCE(nn.Module):
+    """
+    Balanced Softmax Cross-Entropy
+    (Ren et al., NeurIPS 2020 “BS-CE for Long-Tailed Recognition”)
+
+    logits' = logits + log(n_j)      # n_j: 每类样本数
+    loss    = CE(logits', targets)
+    """
+
+    def __init__(self, class_counts: torch.Tensor):
+        super().__init__()
+        # log_prior 形状 [num_classes]
+        log_prior = torch.log(class_counts.float().clamp(min=1.0))
+        self.register_buffer("log_prior", log_prior)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        return f.cross_entropy(logits + self.log_prior, targets)

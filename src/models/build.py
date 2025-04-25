@@ -15,10 +15,11 @@ def build_model():
     An image classification model instance created by `timm`.
     """
     model = timm.create_model(
-        cfg.model.backbone,            # Backbone architecture, e.g., 'swin_base_patch4_window7_384'
+        cfg.model.backbone,  # Backbone architecture, e.g., 'swin_base_patch4_window7_384'
         pretrained=cfg.model.pretrained,  # Whether to load pretrained weights
         num_classes=cfg.model.num_classes,  # Number of output classes
-        drop_rate=0.0,                 # Dropout probability
-        drop_path_rate=0.1             # Drop path probability (for transformer-based models)
+        drop_rate=0.0,  # Dropout probability
+        drop_path_rate=0.1,  # Drop path probability (for transformer-based models)
+        fused_attn=True,
     )
     return model

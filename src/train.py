@@ -5,6 +5,7 @@ import torch
 
 from kornia.augmentation import Normalize as KNormalize
 from kornia.augmentation.auto import RandAugment
+from timm.utils import ModelEmaV2
 from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchmetrics import MetricCollection
@@ -18,7 +19,6 @@ from tqdm import tqdm
 from src.config import cfg
 from src.data.retino_dataset import RetinoDataset
 from src.models.build import build_model
-from src.utils import FocalLoss
 from src.utils import (
     seed_everything,
     split_dataframe,
@@ -27,6 +27,8 @@ from src.utils import (
     build_optimizer,
     build_scheduler,
     apply_mixup_cutmix,
+    FocalLoss,
+    BalancedSoftmaxCE,
 )
 
 
@@ -77,7 +79,9 @@ def main():
     rand_aug_gpu = None
     gpu_normalize = None
     if getattr(cfg.train, "rand_aug_gpu", False):
-        rand_aug_gpu = RandAugment(n=2, m=9).to(device)
+        n = getattr(cfg.train, "rand_aug_n", 2)
+        m = getattr(cfg.train, "rand_aug_m", 9)
+        rand_aug_gpu = RandAugment(n=n, m=m).to(device)
         gpu_normalize = KNormalize(
             mean=torch.tensor((0.485, 0.456, 0.406), device=device),
             std=torch.tensor((0.229, 0.224, 0.225), device=device),
@@ -127,55 +131,54 @@ def main():
     if cfg.train.compile:
         model = torch.compile(model, mode=cfg.train.compile_mode)
 
-    # Layer-wise fine-tuning: freeze backbone parameters for the first `freeze_epochs`
+    # ----- Layer-wise fine-tuning -----
     freeze_epochs = getattr(cfg.train, "freeze_epochs", 0)
     if freeze_epochs > 0:
         print(f"Freezing backbone parameters for the first {freeze_epochs} epochs")
         for name, param in model.named_parameters():
-            # Only keep the classification head trainable initially
-            if not name.startswith("head."):
-                param.requires_grad = False    # Layer-wise fine-tuning: freeze backbone parameters
+            if not name.startswith("head."):  # Only train the classification head
+                param.requires_grad = False
 
-    # Class‑Balanced Loss
-    # Reference: “Class‑Balanced Loss Based on Effective Number of Samples”
-    # https://arxiv.org/abs/1901.05555
-    if getattr(cfg.train, "use_cb_loss", False):
-        # 1) Count the number of samples for each class
-        counts = train_df[cfg.data.col_label].value_counts().sort_index().values.astype(np.float32)
-        # 2) Set β (typically between 0.9–0.9999), specified in config: cfg.train.cb_beta
+    # ----- Build criterion -----
+    labels = train_df[cfg.data.col_label]
+    num_classes = labels.nunique()
+    counts_np = labels.value_counts().sort_index().values.astype(np.float32)  # Sum of counts equals total samples N
+    counts_t = torch.tensor(counts_np, dtype=torch.float32, device=device)  # Tensor of per-class counts [C]
+
+    loss_type = getattr(cfg.train, "loss_type", "ce").lower()
+
+    if loss_type == "balanced_softmax":
+        # Balanced Softmax Cross-Entropy (Ren et al., NeurIPS 2020)
+        criterion = BalancedSoftmaxCE(class_counts=counts_t)
+
+    elif loss_type == "cb_focal":
+        # Class-Balanced Focal Loss
         beta = getattr(cfg.train, "cb_beta", 0.9999)
-        # 3) Compute effective number of samples: E_n = (1 - βⁿ) / (1 - β)
-        effective_num = 1.0 - np.power(beta, counts)
-        weights = (1.0 - beta) / (effective_num + 1e-8)
-        # 4) Normalize the weights so that ∑w_i = number of classes
-        weights = weights / np.sum(weights) * len(weights)
-        weight = torch.tensor(weights, dtype=torch.float32, device=device)
-        # 5) Construct CB + Focal Loss
+        effective = 1.0 - torch.pow(beta, counts_t)  # (1 - β^n)
+        weights = (1.0 - beta) / (effective + 1e-8)  # w_i = (1-β)/(1-β^n)
+        weights = weights / weights.sum() * num_classes  # Normalize so sum(weights)=num_classes
         criterion = FocalLoss(
             gamma=getattr(cfg.train, "focal_gamma", 2.0),
-            weight=weight
-        )
-    else:
-        # Original FocalLoss (without class weighting)
-        criterion = FocalLoss(
-            gamma=getattr(cfg.train, "focal_gamma", 2.0),
-            weight=None
+            weight=weights,
         )
 
+    else:  # "ce" (default)
+        # Standard weighted Cross-Entropy; weight inversely proportional to class frequency
+        weight = 1.0 / (counts_t + 1e-8)
+        weight = weight / weight.sum() * num_classes
+        criterion = torch.nn.CrossEntropyLoss(weight=weight)
+
+    print(f"Using loss: {loss_type},  class weights: {criterion.weight if hasattr(criterion, 'weight') else 'N/A'}")
+
+    # ----- Optimizer, scheduler, scaler, EMA -----
     optimizer = build_optimizer(model, cfg.train)
     scheduler = build_scheduler(optimizer, cfg.train)
     scaler = GradScaler("cuda", enabled=torch.cuda.is_available())
 
-    from timm.utils import ModelEmaV2
-    ema = (
-        ModelEmaV2(model, decay=cfg.train.ema_decay)
-        if cfg.train.ema_decay
-        else None
-    )
+    ema = ModelEmaV2(model, decay=cfg.train.ema_decay) if cfg.train.ema_decay else None
 
     best_val_f1 = 0.0
-    # List to keep saved interval checkpoint filenames
-    interval_files = []
+    interval_files = []  # Store periodic checkpoint filenames
 
     # ──────────────── 9. Training Loop ────────────────
     for epoch in range(1, cfg.train.epochs + 1):
