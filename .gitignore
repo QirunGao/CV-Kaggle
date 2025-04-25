@@ -39,3 +39,7 @@ target/
 # --- System Files ---
 .DS_Store  # macOS system file
 Thumbs.db  # Windows thumbnail cache
+
+# --- Input & Output Directories ---
+input/
+output/
